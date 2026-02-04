@@ -3,7 +3,7 @@
 [![Python Version](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-![Alt text](resource\imgs\Segmed.png)
+![SegMed LOGO](resource/imgs/Segmed.png)
 > **SegMed: An Open-Source Desktop Tool for Deploying Pre-trained Deep Learning Models in 3D Medical Image Segmenta-tion**
 
 A comprehensive medical image segmentation tool supporting multiple deep learning frameworks and providing advanced visualization capabilities for 3D medical imaging.
