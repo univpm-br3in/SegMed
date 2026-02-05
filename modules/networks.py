@@ -47,7 +47,7 @@ class Network:
 
     def load_model(self, model_path, weights_path=None):
         """Load a model (Keras, PyTorch, or MONAI Bundle).
-        
+
         Args:
             model_path: Path to the model file or directory
             weights_path: Optional path to weights file (for TorchScript models)
@@ -237,17 +237,17 @@ class Network:
         """
         if not os.path.isdir(path):
             return False, None
-        
+
         # Check for V2 first (more common now)
         v2_handler = NnUNetV2Handler()
         if v2_handler.is_nnunet_folder(path):
             return True, 2
-        
+
         # Check for V1
         v1_handler = NnUNetV1Handler()
         if v1_handler.is_nnunet_v1_folder(path):
             return True, 1
-        
+
         return False, None
 
     def _load_nnunet_model(self, folder_path):
@@ -257,11 +257,11 @@ class Network:
         try:
             # Auto-detect version
             is_nnunet, version = self._is_nnunet_folder(folder_path)
-            
+
             if not is_nnunet:
                 print("✗ Not a valid nnU-Net folder")
                 return False
-            
+
             if version == 2:
                 return self._load_nnunet_v2(folder_path)
             elif version == 1:
@@ -269,13 +269,13 @@ class Network:
             else:
                 print("✗ Unknown nnU-Net version")
                 return False
-                
+
         except Exception as e:
             print(f"✗ Error loading nnU-Net model: {e}")
             import traceback
             traceback.print_exc()
             return False
-    
+
     def _load_nnunet_v2(self, folder_path):
         """Load nnU-Net V2 model using official nnUNetPredictor."""
         try:
@@ -312,7 +312,7 @@ class Network:
             import traceback
             traceback.print_exc()
             return False
-    
+
     def _load_nnunet_v1(self, folder_path):
         """Load nnU-Net V1 model."""
         try:
@@ -336,7 +336,7 @@ class Network:
                 return False
 
             # Set model type and dimensions
-            self.model = 1 # just a placeholder to avoid errors
+            self.model = 1  # just a placeholder to avoid errors
             self.model_type = 'nnunet'
             self.input_dims = self.nnunet_v1_handler.get_input_dimensions()
 
@@ -512,61 +512,120 @@ class Network:
                 print(f"    ⚠ Error loading {weight_file}: {e}")
                 continue
 
-        print(f"  ⚠ Could not load weights from any checkpoint file")
+        # FALLBACK: Search entire bundle directory for .pt/.pth files
+        print(f"  ⚠ Standard weight files not found, searching entire bundle...")
+
+        found_weights = []
+        for root, dirs, files in os.walk(bundle_path):
+            for file in files:
+                if file.endswith(('.pt', '.pth')) and not file.startswith('.'):
+                    full_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(full_path, bundle_path)
+                    found_weights.append((file, full_path, rel_path))
+
+        if not found_weights:
+            print(f"  ⚠ No .pt or .pth files found in entire bundle")
+            return False
+
+        print(f"  Found {len(found_weights)} weight file(s):")
+        for fname, fpath, rel_path in found_weights:
+            file_size_mb = os.path.getsize(fpath) / (1024 * 1024)
+            print(f"    - {rel_path} ({file_size_mb:.1f} MB)")
+
+        # Try each found weight file
+        for fname, weight_path, rel_path in found_weights:
+            print(f"  Trying {rel_path}...")
+
+            try:
+                # Load checkpoint
+                checkpoint = torch.load(
+                    weight_path, map_location=device, weights_only=False)
+
+                # Extract state dict from various checkpoint formats
+                state_dict = None
+
+                if isinstance(checkpoint, dict):
+                    # Try common state dict keys
+                    for key in ['state_dict', 'model_state_dict', 'model', 'network']:
+                        if key in checkpoint:
+                            state_dict = checkpoint[key]
+                            print(
+                                f"    Found state_dict in checkpoint['{key}']")
+                            break
+
+                    # If no known key, checkpoint itself might be the state dict
+                    if state_dict is None:
+                        # Check if it looks like a state dict (has weight/bias keys)
+                        if any('weight' in k or 'bias' in k for k in checkpoint.keys()):
+                            state_dict = checkpoint
+                            print(f"    Checkpoint is the state_dict")
+
+                elif isinstance(checkpoint, torch.nn.Module):
+                    # Full model saved
+                    state_dict = checkpoint.state_dict()
+                    print(f"    Extracted state_dict from full model")
+
+                if state_dict is None:
+                    print(f"    ⚠ Could not find state_dict in {fname}")
+                    continue
+
+                # Try to load state dict into model
+                try:
+                    # Strict loading (all keys must match)
+                    self.model.load_state_dict(state_dict, strict=True)
+                    print(f"  ✓ Loaded weights from {rel_path} (strict)")
+
+                    # Verify weights are not all zeros
+                    first_param = next(self.model.parameters()).flatten()[:10]
+                    if torch.all(first_param == 0):
+                        print(f"    ⚠ Warning: Parameters are all zeros!")
+                        continue
+
+                    print(f"    Sample weights: {first_param[:5]}")
+                    return True
+
+                except RuntimeError as e:
+                    if "size mismatch" in str(e) or "Missing key" in str(e):
+                        print(
+                            f"    ⚠ Strict loading failed: {str(e)[:100]}...")
+
+                        # Try non-strict loading
+                        try:
+                            missing, unexpected = self.model.load_state_dict(
+                                state_dict, strict=False)
+                            print(
+                                f"  ✓ Loaded weights from {rel_path} (non-strict)")
+
+                            if missing:
+                                print(f"    ⚠ Missing keys: {len(missing)}")
+                            if unexpected:
+                                print(
+                                    f"    ⚠ Unexpected keys: {len(unexpected)}")
+
+                            # Verify weights are loaded
+                            first_param = next(
+                                self.model.parameters()).flatten()[:10]
+                            if torch.all(first_param == 0):
+                                print(f"    ⚠ Warning: Parameters are all zeros!")
+                                continue
+
+                            print(f"    Sample weights: {first_param[:5]}")
+                            return True
+
+                        except Exception as e2:
+                            print(
+                                f"    ⚠ Non-strict loading also failed: {e2}")
+                            continue
+                    else:
+                        print(f"    ⚠ Loading failed: {e}")
+                        continue
+
+            except Exception as e:
+                print(f"    ⚠ Error loading {fname}: {e}")
+                continue
+
+        print(f"  ⚠ Could not load weights from any found .pt/.pth file")
         return False
-
-    def _ensure_softmax_in_postprocessing(self):
-        """
-        Ensure postprocessing includes Activations (softmax) before AsDiscreted.
-
-        Many MONAI bundles have AsDiscreted with argmax=True, but this only
-        does argmax on raw logits. We need softmax first!
-        """
-        from monai.transforms import Compose, Activations
-
-        if self.monai_postprocessing is None:
-            return
-
-        # Check if Activations transform exists
-        has_activations = False
-        for transform in self.monai_postprocessing.transforms:
-            if 'Activations' in type(transform).__name__ or 'Softmax' in type(transform).__name__:
-                has_activations = True
-                break
-
-        if has_activations:
-            print("  ✓ Activations already in postprocessing")
-            return
-
-        # Need to add Activations before AsDiscreted
-        print("  ⚠ Missing Activations - adding softmax transform")
-
-        new_transforms = []
-        activations_added = False
-
-        for transform in self.monai_postprocessing.transforms:
-            transform_name = type(transform).__name__
-
-            # Add Activations BEFORE AsDiscreted
-            if 'AsDiscreted' in transform_name and not activations_added:
-                # Add softmax transform
-                softmax_transform = Activations(keys="pred", softmax=True)
-                new_transforms.append(softmax_transform)
-                activations_added = True
-                print(
-                    f"    Added Activations(softmax) before {transform_name}")
-
-            # Keep the original transform
-            new_transforms.append(transform)
-
-        # If no AsDiscreted found, add Activations at the beginning
-        if not activations_added:
-            print("    Added Activations(softmax) at start of postprocessing")
-            softmax_transform = Activations(keys="pred", softmax=True)
-            new_transforms.insert(0, softmax_transform)
-
-        # Replace postprocessing with new version
-        self.monai_postprocessing = Compose(new_transforms)
 
     def _override_all_devices_in_config(self, parser, device_str):
         """
@@ -849,28 +908,30 @@ class Network:
 
     def _load_pytorch_ts(self, model_path, weights_path=None):
         """Load TorchScript model with optional external weights.
-        
+
         Args:
             model_path: Path to TorchScript (.ts) file
             weights_path: Optional path to separate weights file (.pth, .pt)
         """
         device = self._get_torch_device()
-        
+
         # Load the TorchScript model architecture
         self.model = torch.jit.load(model_path, map_location=device)
         self.model.to(device)
-        
+
         # If weights_path is provided, load and apply external weights
         if weights_path:
             print(f"Loading external weights from: {weights_path}")
-            
+
             if not os.path.exists(weights_path):
-                raise FileNotFoundError(f"Weights file not found: {weights_path}")
-            
+                raise FileNotFoundError(
+                    f"Weights file not found: {weights_path}")
+
             try:
                 # Load the weights
-                weights = torch.load(weights_path, map_location=device, weights_only=False)
-                
+                weights = torch.load(
+                    weights_path, map_location=device, weights_only=False)
+
                 # Handle different weight formats
                 if isinstance(weights, dict):
                     if 'state_dict' in weights:
@@ -893,15 +954,15 @@ class Network:
                         state_dict = weights.state_dict()
                     else:
                         raise ValueError("Unsupported weights format")
-                
+
                 # Load state dict into the model
                 self.model.load_state_dict(state_dict, strict=False)
                 print(f"✓ External weights loaded successfully")
-                
+
             except Exception as e:
                 print(f"⚠ Warning: Failed to load external weights: {e}")
                 print(f"  Using weights embedded in TorchScript file")
-        
+
         self.model.eval()
         self.model_type = 'pytorch'
         self.input_dims = self._torch_find_input_dim(self.model)
@@ -1433,7 +1494,7 @@ class Network:
             if not hasattr(self.model, 'input_shape'):
                 print("Warning: Keras model has no input_shape attribute")
                 return False, None, None
-                
+
             input_shape = self.model.input_shape
 
             if input_shape is None:
@@ -1449,19 +1510,22 @@ class Network:
 
             # Skip batch dimension (first element)
             if len(input_shape) <= 1:
-                print(f"Warning: Keras model input_shape too short: {input_shape}")
+                print(
+                    f"Warning: Keras model input_shape too short: {input_shape}")
                 return False, None, None
-                
+
             model_shape = input_shape[1:]  # Skip batch dimension
-            
-            print(f"Debug: Keras model shape (after removing batch): {model_shape}")
+
+            print(
+                f"Debug: Keras model shape (after removing batch): {model_shape}")
             print(f"Debug: Image shape: {image_shape}")
             print(f"Debug: Input channels setting: {self.input_channels}")
 
             # Handle None dimensions (flexible dimensions)
             # If model has None dimensions, we consider it flexible/compatible
             if None in model_shape:
-                print("Debug: Model has flexible dimensions (None), considering compatible")
+                print(
+                    "Debug: Model has flexible dimensions (None), considering compatible")
                 return True, None, None
 
             # Auto-detect channel format if not set
@@ -1471,23 +1535,27 @@ class Network:
                     # Check if first or last dimension is likely channels
                     if model_shape[0] in [1, 3, 4]:
                         self.input_channels = "channel_first"
-                        print(f"Debug: Auto-detected channel_first (first dim = {model_shape[0]})")
+                        print(
+                            f"Debug: Auto-detected channel_first (first dim = {model_shape[0]})")
                     elif model_shape[-1] in [1, 3, 4]:
                         self.input_channels = "channel_last"
-                        print(f"Debug: Auto-detected channel_last (last dim = {model_shape[-1]})")
+                        print(
+                            f"Debug: Auto-detected channel_last (last dim = {model_shape[-1]})")
                     else:
                         # Ambiguous, default to channel_last (TensorFlow/Keras convention)
                         self.input_channels = "channel_last"
                         print("Debug: Ambiguous format, defaulting to channel_last")
-                        
+
                 elif len(model_shape) == 4:  # 3D model
                     # Check if first or last dimension is likely channels
                     if model_shape[0] in [1, 3, 4]:
                         self.input_channels = "channel_first"
-                        print(f"Debug: Auto-detected channel_first (first dim = {model_shape[0]})")
+                        print(
+                            f"Debug: Auto-detected channel_first (first dim = {model_shape[0]})")
                     elif model_shape[-1] in [1, 3, 4]:
                         self.input_channels = "channel_last"
-                        print(f"Debug: Auto-detected channel_last (last dim = {model_shape[-1]})")
+                        print(
+                            f"Debug: Auto-detected channel_last (last dim = {model_shape[-1]})")
                     else:
                         # Ambiguous, default to channel_last (TensorFlow/Keras convention)
                         self.input_channels = "channel_last"
@@ -1511,7 +1579,7 @@ class Network:
                     required = tuple(model_shape)
 
                 print(f"Debug: Required shape for 2D: {required}")
-                
+
                 if tuple(image_shape) == required:
                     return True, None, None
                 else:
@@ -1526,16 +1594,18 @@ class Network:
 
                 # Extract spatial dimensions based on channel format
                 if self.input_channels == "channel_last":
-                    required = tuple(model_shape[:3])  # (D, H, W) - first 3 dims
+                    # (D, H, W) - first 3 dims
+                    required = tuple(model_shape[:3])
                 elif self.input_channels == "channel_first":
-                    required = tuple(model_shape[1:])  # (D, H, W) - last 3 dims
+                    # (D, H, W) - last 3 dims
+                    required = tuple(model_shape[1:])
                 else:
                     # No channels, all spatial
                     required = tuple(model_shape)
 
                 print(f"Debug: Required shape for 3D: {required}")
                 print(f"Debug: Image shape: {tuple(image_shape)}")
-                
+
                 if tuple(image_shape) == required:
                     print("Debug: Shapes match! Compatible.")
                     return True, None, None
@@ -1544,7 +1614,8 @@ class Network:
                     return False, required, "resize"
 
             # Unknown model shape
-            print(f"Warning: Unknown Keras model shape length: {len(model_shape)}")
+            print(
+                f"Warning: Unknown Keras model shape length: {len(model_shape)}")
             return False, None, None
 
         except AttributeError as e:
@@ -1616,13 +1687,13 @@ class Network:
     def predict_nnunet(self, image_data, spacing, origin=None, direction=None):
         """
         Run nnU-Net prediction (works for both V1 and V2).
-        
+
         Args:
             image_data: Input image array
             spacing: Voxel spacing tuple
             origin: Image origin (optional, defaults to (0,0,0))
             direction: Direction cosine matrix (optional, defaults to identity)
-        
+
         Returns:
             Segmentation mask
         """
@@ -1630,29 +1701,29 @@ class Network:
         if self.nnunet_version == 2:
             if self.nnunet_handler is None:
                 raise ValueError("nnU-Net V2 model not loaded")
-            
+
             segmentation = self.nnunet_handler.predict(
-                image_data, 
-                spacing, 
-                origin=origin, 
+                image_data,
+                spacing,
+                origin=origin,
                 direction=direction
             )
         elif self.nnunet_version == 1:
             if self.nnunet_v1_handler is None:
                 raise ValueError("nnU-Net V1 model not loaded")
-            
+
             segmentation = self.nnunet_v1_handler.predict(
-                image_data, 
-                spacing, 
-                origin=origin, 
+                image_data,
+                spacing,
+                origin=origin,
                 direction=direction
             )
         else:
             raise ValueError("No nnU-Net model loaded")
-        
+
         if segmentation is None:
             raise ValueError("Prediction returned None!")
-        
+
         return segmentation
 
     def get_nnunet_class_info(self):
@@ -1674,7 +1745,7 @@ class Network:
                 'patch_size': patch_size if patch_size else 'N/A',
                 'version': 'V1'
             }
-        
+
         return None
 
 
