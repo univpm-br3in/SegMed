@@ -403,19 +403,8 @@ SegMed/
 
 ## 📚 Citation
 
-If you use SegMed in your research, please cite:
-
-```bibtex
-@article{your_paper_2024,
-  title={[Paper Title - To be added]},
-  author={[Authors - To be added]},
-  journal={[Journal - To be added]},
-  year={2024},
-  volume={[Volume]},
-  pages={[Pages]},
-  doi={[DOI]}
-}
-```
+A manuscript describing the methodology and validation of this software is in preparation.
+If you use this software, please cite the associated paper (citation to be added upon publication).
 
 ---
 
