@@ -435,6 +435,14 @@ This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENS
 
 ---
 
+## Disclaimer
+
+This software is provided for **research and educational purposes only**.  
+It is **not intended for clinical use**, **medical diagnosis**, **treatment planning**, or **decision-making**.  
+The authors assume **no responsibility or liability** for any use of this software in clinical practice.
+
+---
+
 ## 🙏 Acknowledgments
 
 - nnU-Net team for the excellent segmentation framework
