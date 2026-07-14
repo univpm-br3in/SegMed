@@ -105,23 +105,68 @@ git clone https://github.com/univpm-br3in/SegMed.git
 cd SegMed
 ```
 
-### Step 3: Create Virtual Environment
+### Step 3: Run the main.py file
 ```bash
-uv venv
+uv run main.py
 ```
+On the first run, uv will create a virtual environment and install the dependencies specified in pyproject.toml. This may take several minutes. Subsequent runs will normally start much faster because the environment and downloaded packages are reused.
 
-### Step 4: Activate Virtual Environment
+---
+### 🚀 GPU Acceleration
 
-**Windows:**
-```powershell
-.venv\Scripts\activate
-```
+SegMed includes both PyTorch and TensorFlow. By default, the project installs the standard versions specified in `pyproject.toml`. CPU inference is supported without additional configuration.
 
-### Step 5: Install Dependencies
+GPU acceleration is not configured automatically because the required packages depend on:
+
+* The operating system
+* The GPU manufacturer and model
+* The installed GPU driver
+* CUDA compatibility
+* The selected deep-learning framework
+
+#### PyTorch GPU Support
+
+To use an NVIDIA GPU with PyTorch, install a CUDA-enabled build of `torch` and `torchvision` that is compatible with your system. Follow the official PyTorch installation instructions when selecting the appropriate CUDA version.
+
+Verify the PyTorch configuration with:
 
 ```bash
-uv sync
+uv run python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 ```
+
+#### TensorFlow GPU Support
+
+TensorFlow GPU support depends on the operating system.
+
+**Linux or Windows with WSL2**
+
+For NVIDIA GPU support, install TensorFlow together with its CUDA dependencies:
+
+```bash
+uv add "tensorflow[and-cuda]>=2.20.0"
+```
+
+An appropriate NVIDIA driver must already be installed on the host system. The required CUDA runtime libraries are then installed in the project environment.
+
+**Native Windows**
+
+TensorFlow 2.10 was the last release that supported NVIDIA CUDA acceleration directly on native Windows. Because SegMed uses TensorFlow 2.20 or later, Windows users must run SegMed through WSL2 to use an NVIDIA GPU with TensorFlow.
+
+Running TensorFlow 2.20 directly on native Windows will use the CPU.
+
+**macOS**
+
+CUDA acceleration is not available on macOS. Apple Silicon users may configure TensorFlow acceleration separately using Apple’s Metal plugin.
+
+Verify whether TensorFlow can access a GPU with:
+
+```bash
+uv run python -c "import tensorflow as tf; print('TensorFlow version:', tf.__version__); print('GPU devices:', tf.config.list_physical_devices('GPU'))"
+```
+
+A correctly configured TensorFlow GPU environment should return at least one device in the `GPU devices` list.
+
+> **Note:** PyTorch and TensorFlow use separate GPU configurations. Successfully enabling GPU acceleration for one framework does not necessarily mean that the other framework is also configured correctly. If no compatible GPU is detected, SegMed will fall back to CPU execution, which may result in slower inference.
 
 ---
 
@@ -131,7 +176,7 @@ uv sync
 
 1. **Launch the Application**
    ```bash
-   python main.py
+   uv run main.py
    ```
 
 
