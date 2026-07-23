@@ -448,9 +448,22 @@ SegMed/
 
 ## 📚 Citation
 
-A manuscript describing the methodology and validation of this software is in preparation.
-If you use this software, please cite the associated paper (citation to be added upon publication).
+If you use SegMed in your research, please cite the following paper:
 
+```bash
+@article{mortada2026segmed,
+  author         = {Mortada, Mhd Jafar and Sbrollini, Agnese and Proniewska-van Dam, Klaudia and Van Dam, Peter M. and Burattini, Laura},
+  title          = {{SegMed}: An Open-Source Desktop Tool for Deploying Pretrained Deep Learning Models in 3D Medical Image Segmentation},
+  journal        = {Applied Sciences},
+  volume         = {16},
+  number         = {7},
+  pages          = {3490},
+  year           = {2026},
+  doi            = {10.3390/app16073490},
+  url            = {https://www.mdpi.com/2076-3417/16/7/3490},
+  issn           = {2076-3417}
+}
+```
 ---
 
 ## 🤝 Contributing
