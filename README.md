@@ -511,6 +511,9 @@ The authors assume **no responsibility or liability** for any use of this softwa
 
 ## 🔄 Version History
 
+### Version 1.0.1 (Current)
+- ✅ Fixed Windowing bug
+
 ### Version 1.0.0 (Current)
 - ✅ Multi-framework model support (nnU-Net V1/V2, PyTorch, Keras, MONAI)
 - ✅ 2D/3D visualization with comparison mode

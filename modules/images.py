@@ -4,6 +4,7 @@ import nrrd
 from skimage.transform import resize
 from PIL import Image as PILImage
 import pydicom
+from pydicom.pixels import apply_modality_lut
 import os
 from modules.dicomSeriesSelectionDialog import DicomSeriesSelectionDialog
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TF info messages
@@ -357,7 +358,7 @@ class Image:
             try:
                 # Single DICOM file - treat as a single slice series
                 ds = pydicom.dcmread(image_path)
-                self.image_data = ds.pixel_array.astype(np.float32)
+                self.image_data = self._get_dicom_pixel_data(ds)
                 
                 # Add a third dimension for single slice (H, W) -> (H, W, 1)
                 if self.image_data.ndim == 2:
@@ -462,7 +463,6 @@ class Image:
             self.hight, self.width, self.slices = shape
             self.processed_image = self.image_data.copy() if self.ww == -1 and self.wl == -1 else self.win_scale(
                 self.image_data, self.wl, self.ww, np.uint8, [0, 255])
-            print(f"Image loaded with shape: {shape}")
             return None
         elif len(shape) == 4:
             self.hight, self.width, self.slices = shape[:-1]
@@ -491,8 +491,10 @@ class Image:
         dicom_data.sort(key=lambda x: x[0])
 
         # Stack the pixel arrays
-        pixel_arrays = [ds.pixel_array.astype(
-            np.float32) for _, ds in dicom_data]
+        pixel_arrays = [
+            self._get_dicom_pixel_data(ds)
+            for _, ds in dicom_data
+        ]
         self.image_data = np.stack(pixel_arrays, axis=-1)
 
         # Get spacing and orientation from first slice
@@ -720,27 +722,55 @@ class Image:
         else:
             raise ValueError("No image loaded. Please load an image first.")
 
-    def win_scale(self, data, wl, ww, dtype, out_range):
+    def win_scale(self, data, wl, ww, dtype=np.uint8, out_range=(0, 255)):
         """
-        Scale pixel intensity data using specified window level, width, and intensity range.
+        Apply DICOM-style linear windowing.
+
+        Parameters
+        ----------
+        data : np.ndarray
+            Image in modality units, such as HU for CT.
+        wl : float
+            Window level/center.
+        ww : float
+            Window width.
+        dtype : np.dtype
+            Output datatype.
+        out_range : tuple
+            Minimum and maximum output intensities.
         """
-        if ww <= 0:
-            return data.astype(dtype)
+        wl = float(wl)
+        ww = float(ww)
 
-        # Precompute bounds
-        low = wl - ww / 2.0
-        high = wl + ww / 2.0
+        if ww < 1:
+            raise ValueError("Window width must be at least 1.")
 
-        # Clip the data in one pass
-        scaled = np.clip(data, low, high)
+        data = np.asarray(data, dtype=np.float32)
+        out_min, out_max = map(float, out_range)
 
-        # Apply linear scaling
-        scaled = ((scaled - (wl - 0.5)) / (ww - 1.0) + 0.5) * \
-            (out_range[1] - out_range[0]) + out_range[0]
+        lower = wl - 0.5 - (ww - 1.0) / 2.0
+        upper = wl - 0.5 + (ww - 1.0) / 2.0
 
-        # Cast to target dtype
+        if ww == 1:
+            scaled = np.where(data <= lower, out_min, out_max)
+        else:
+            scaled = np.empty_like(data, dtype=np.float32)
+
+            below = data <= lower
+            above = data > upper
+            middle = ~(below | above)
+
+            scaled[below] = out_min
+            scaled[above] = out_max
+
+            scaled[middle] = (
+                ((data[middle] - (wl - 0.5)) / (ww - 1.0) + 0.5)
+                * (out_max - out_min)
+                + out_min
+            )
+
+        scaled = np.clip(scaled, out_min, out_max)
         return scaled.astype(dtype)
-
     def get_processed_image(self):
         """
         Get the processed image.
@@ -888,3 +918,13 @@ class Image:
         }
 
         return space_map.get(space.lower(), ('R', 'A', 'S'))  # Default to RAS
+    
+    @staticmethod
+    def _get_dicom_pixel_data(ds):
+        """
+        Decode DICOM pixels and convert stored values to modality values,
+        such as Hounsfield units for CT.
+        """
+        pixels = ds.pixel_array
+        pixels = apply_modality_lut(pixels, ds)
+        return np.asarray(pixels, dtype=np.float32)

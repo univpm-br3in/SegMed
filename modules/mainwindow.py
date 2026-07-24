@@ -19,6 +19,7 @@ import os
 import sys
 import scipy.ndimage as ndimage
 
+
 from modules import images
 from modules import mesh
 from modules import networks
@@ -40,7 +41,7 @@ class MainWindow(QMainWindow):
         self.current_sagittal_slice = 0
         self.current_coronal_slice = 0
         self.enabeled_classes = []
-        self.image = images.Image(0, 0)  # ww, wl
+        self.image = images.Image(-1, -1)  # ww, wl
         self.network = networks.Network()
         self.mesh = mesh.Mesh()
         self.mesh_items = []
