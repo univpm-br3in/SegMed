@@ -459,6 +459,7 @@ class Image:
         self.pre_segmentation = None
         self.GT_segmentation = None
         shape = self.image_data.shape
+        self.num_of_class = None
         if len(shape) == 3:
             self.hight, self.width, self.slices = shape
             self.processed_image = self.image_data.copy() if self.ww == -1 and self.wl == -1 else self.win_scale(
