@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 import tempfile
 import SimpleITK as sitk
+from glob import glob
 
 # Suppress nnU-Net environment warnings (not needed for inference-only usage)
 # These paths are only required for training/preprocessing, not for running predictions
@@ -64,17 +65,15 @@ class NnUNetV2Handler:
         
         # Check if at least one fold has a checkpoint
         for fold_dir in fold_dirs:
-            checkpoint_final = fold_dir / "checkpoint_final.pth"
-            checkpoint_best = fold_dir / "checkpoint_best.pth"
-            if checkpoint_final.exists() or checkpoint_best.exists():
-                return True
+            if glob(str(fold_dir / "*.pth")):
+                # If any .pth file exists, assume it's a checkpoint
+                return True  
             print(f"✗ No checkpoint found in {fold_dir}")
         
         return False
     
     def load_nnunet_model(self, folder_path: str, device: torch.device, 
-                         folds: Optional[Tuple[int, ...]] = None,
-                         checkpoint_name: str = 'checkpoint_final.pth') -> bool:
+                         folds: Optional[Tuple[int, ...]] = None) -> bool:
         """
         Load nnU-Net V2 model using the official nnUNetPredictor.
         
@@ -95,7 +94,16 @@ class NnUNetV2Handler:
             print(f"Model path: {folder_path}")
             
             self.model_folder = Path(folder_path)
-            self.checkpoint_name = checkpoint_name
+            
+            pth_files = glob(str(self.model_folder / "fold_*" / "*.pth"))
+            if "best" in [Path(f).name for f in pth_files]:
+                # find THE EXACT name of the best checkpoint
+                for f in pth_files:
+                    if "best" in Path(f).name:
+                        self.checkpoint_name = Path(f).name
+                        break
+            else:
+                self.checkpoint_name = os.path.basename(pth_files[0])
             
             # Load dataset.json for information (OPTIONAL)
             dataset_json_path = self.model_folder / "dataset.json"
@@ -144,7 +152,6 @@ class NnUNetV2Handler:
                 verbose_preprocessing=False,
                 allow_tqdm=True
             )
-            
             # Initialize the predictor with model folder and folds
             self.predictor.initialize_from_trained_model_folder(
                 str(self.model_folder),

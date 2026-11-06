@@ -409,7 +409,7 @@ class NnUNetV1Handler:
             return model_files
 
         # Pattern 5: Search for model_*.pth files (some V1 variants)
-        pth_files = list(self.model_folder.glob("**/model_*.pth"))
+        pth_files = list(self.model_folder.glob("**/*.pth"))
         if pth_files:
             return pth_files
 

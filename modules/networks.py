@@ -3,8 +3,6 @@ Clean Network Module for SegMed
 Supports Keras, PyTorch, and MONAI Bundle models
 """
 
-from glob import glob
-
 import numpy as np
 import torch
 import tensorflow as tf
@@ -289,13 +287,11 @@ class Network:
 
             # Get device
             device = self._get_torch_device()
-            checkpoint_name = glob(os.path.join(folder_path, "fold_*/*.pth"))
-            checkpoint_name = os.path.basename(checkpoint_name[0]) if checkpoint_name else 'checkpoint_final.pth'
+
             success = self.nnunet_handler.load_nnunet_model(
                 folder_path,
                 device,
-                folds=None,  # Auto-detect all folds for ensemble
-                checkpoint_name=checkpoint_name
+                folds=None  # Auto-detect all folds for ensemble
             )
 
             if not success:
@@ -331,9 +327,7 @@ class Network:
             success = self.nnunet_v1_handler.load_nnunet_v1_model(
                 folder_path,
                 device,
-                folds=None,  # Auto-detect all folds for ensemble
-                checkpoint_name='model_final_checkpoint.model'
-            )
+                folds=None)  # Auto-detect all folds for ensemble            )
 
             if not success:
                 return False
