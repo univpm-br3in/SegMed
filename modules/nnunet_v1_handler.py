@@ -556,12 +556,22 @@ class NnUNetV1Handler:
                 if direction is None:
                     direction = np.eye(3)
 
-                # Create SimpleITK image
-                sitk_image = sitk.GetImageFromArray(image)
-                sitk_image.SetSpacing(spacing[::-1])
-                sitk_image.SetOrigin(
-                    origin[::-1] if len(origin) == 3 else origin)
-                sitk_image.SetDirection(direction.flatten().tolist())
+                # SegMed supplies a NumPy array in (x, y, z) order, while
+                # SimpleITK.GetImageFromArray expects (z, y, x).
+                # SimpleITK physical metadata (spacing/origin) is (x, y, z).
+                if image.ndim != 3:
+                    raise ValueError(f"Expected a 3D (x, y, z) image, got {image.shape}")
+                image_zyx = np.ascontiguousarray(
+                    np.asarray(image, dtype=np.float32).transpose(2, 1, 0)
+                )
+                sitk_image = sitk.GetImageFromArray(image_zyx)
+                sitk_image.SetSpacing(tuple(float(v) for v in spacing))
+                sitk_image.SetOrigin(tuple(float(v) for v in origin))
+                # Direction/origin must be provided in the ITK (LPS) physical
+                # coordinate convention; convert upstream if originating from RAS.
+                sitk_image.SetDirection(
+                    np.asarray(direction, dtype=float).reshape(3, 3).ravel().tolist()
+                )
 
                 sitk.WriteImage(sitk_image, str(input_file))
                 print(f"  Input saved to: {input_file.name}")
@@ -571,9 +581,19 @@ class NnUNetV1Handler:
                 prediction = self._run_v1_inference(
                     str(input_file), str(output_dir))
 
-                # The prediction should already be a numpy array
+                # All V1 inference branches return a SimpleITK-order (z, y, x)
+                # array. Convert back to the SegMed input convention (x, y, z).
                 if prediction is None:
                     raise ValueError("Prediction failed")
+                prediction = np.asarray(prediction)
+                expected_zyx_shape = image.shape[::-1]
+                if prediction.shape != expected_zyx_shape:
+                    raise ValueError(
+                        f"Unexpected V1 output shape {prediction.shape}; "
+                        f"expected {expected_zyx_shape} (z, y, x) for "
+                        f"input {image.shape} (x, y, z)"
+                    )
+                prediction = np.ascontiguousarray(prediction.transpose(2, 1, 0))
 
                 unique_values = np.unique(prediction)
                 print(f"\n✓ Inference complete")
