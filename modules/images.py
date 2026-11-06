@@ -611,13 +611,14 @@ class Image:
         vectorized_map = np.vectorize(value_map.get)
         self.GT_segmentation = vectorized_map(self.GT_segmentation)
 
-        if len(shape) == 3:
+        if len(self.GT_segmentation.shape) == 3:
             if self.GT_segmentation.shape == shape:
                 self.num_of_class = len(np.unique(self.GT_segmentation))
                 return True
 
-        elif len(shape) == 4:
-            if self.GT_segmentation.shape == shape[:-1]:
+        elif len(self.GT_segmentation.shape) == 4:
+            if shape == self.GT_segmentation.shape[:-1]:
+                self.GT_segmentation = np.squeeze(self.GT_segmentation[:, :, :, 0])
                 self.num_of_class = len(np.unique(self.GT_segmentation))
                 return True
         self.GT_segmentation = None
