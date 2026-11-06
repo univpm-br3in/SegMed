@@ -1061,7 +1061,7 @@ class MainWindow(QMainWindow):
 
         # Info text
         info_label = QLabel(
-            "SegMed - Br3in\nDeveloped at \nUniversità Politecnica delle Marche\nhttps://br3in.dii.univpm.it/")
+            "SegMed - Br3in\nDeveloped at \nUniversità Politecnica delle Marche\n\n Version 1.5.0")
         info_label.setAlignment(Qt.AlignCenter)
 
         # OK button

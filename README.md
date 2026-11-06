@@ -1,12 +1,17 @@
-# SegMed - Medical Image Segmentation Tool
+# SegMed — Medical Image Segmentation Tool
 
-[![Python Version](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)](https://github.com/univpm-br3in/SegMed/releases)
+[![Python Version](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 ![SegMed LOGO](resource/imgs/Segmed.png)
-> **SegMed: An Open-Source Desktop Tool for Deploying Pre-trained Deep Learning Models in 3D Medical Image Segmenta-tion**
+> **SegMed: An Open-Source Desktop Tool for Deploying Pretrained Deep Learning Models in 3D Medical Image Segmentation**
 
-A comprehensive medical image segmentation tool supporting multiple deep learning frameworks and providing advanced visualization capabilities for 3D medical imaging.
+SegMed is an open-source desktop application for running pretrained deep learning segmentation models on 3D medical images, visualizing predictions, evaluating segmentations, and exporting anatomical surface meshes. It supports nnU-Net, MONAI, PyTorch, Keras, and TensorFlow.
+
+**New in v1.5.0:** A Windows installer with automatic NVIDIA GPU configuration for supported PyTorch builds, TensorFlow SavedModel support, and improved image-to-model spatial shape handling.
+
+**[Download SegMed for Windows](https://github.com/univpm-br3in/SegMed/releases/latest)** · [Install from source](#installation-from-source) · [Cite SegMed](#citation)
 
 
 ---
@@ -15,6 +20,7 @@ A comprehensive medical image segmentation tool supporting multiple deep learnin
 
 - [Features](#features)
 - [Installation](#installation)
+- [GPU Acceleration](#gpu-acceleration)
 - [Usage](#usage)
 - [Supported Model Formats](#supported-model-formats)
 - [Preprocessing Options](#preprocessing-options)
@@ -30,11 +36,11 @@ A comprehensive medical image segmentation tool supporting multiple deep learnin
 ### 🧠 **Multi-Framework Model Support**
 - **nnU-Net V1 & V2**: Full support for both versions including 2D and 3D models
 - **PyTorch Models**: Support for `.pt`, `.pth`, `.pth.tar`, and TorchScript (`.ts`) models
-- **Keras/TensorFlow Models**: Support for `.h5`, `.keras`, `.json`, and `.yaml` formats
+- **Keras/TensorFlow Models**: Support for `.h5`, `.keras`, TensorFlow SavedModel directories (`saved_model.pb` and `variables/`), and supported architecture/weights formats
 - **MONAI Bundles**: Complete support for MONAI bundle architectures
 
 ### 🖼️ **Advanced Image Processing**
-- **Multiple Image Formats**: DICOM, NIfTI (.nii, .nii.gz), NRRD (.nrrd, ..) and numpy bassed images (.npy)
+- **Multiple Image Formats**: DICOM, NIfTI (`.nii`, `.nii.gz`), NRRD (`.nrrd`) and NumPy arrays (`.npy`)
 - **DICOMDIR Support**: Load series from DICOMDIR files with series selection dialog
 - **Window/Level Presets**: Pre-configured presets for brain, bone, lung, liver, and more
 - **Custom Window/Level**: Manual adjustment for optimal visualization
@@ -44,6 +50,7 @@ A comprehensive medical image segmentation tool supporting multiple deep learnin
 - **Min/Max Normalization**: Custom range normalization
 - **Gaussian Blur**: Noise reduction with configurable sigma
 - **Isotropic Resampling**: Uniform voxel spacing adjustment
+- **Model Input Shape Adaptation**: Automatic zero-padding for smaller images and selectable cropping for larger images, with inverse spatial restoration of the predicted segmentation
 - **Automatic Preprocessing**: Model-specific preprocessing for nnU-Net and MONAI models
 
 ### 📊 **Visualization & Analysis**
@@ -88,85 +95,78 @@ A comprehensive medical image segmentation tool supporting multiple deep learnin
 
 ## 🚀 Installation
 
-### Prerequisites
-- Python 3.11 or higher
-- [uv](https://github.com/astral-sh/uv) package manager
+### Windows installer (recommended)
 
-### Step 1: Install uv
+SegMed **v1.5.0** includes a Windows installer. You do not need to install Python, `uv`, PyTorch, or the other Python packages manually.
 
-**Windows (PowerShell):**
-```powershell
-powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
+1. Open the [SegMed GitHub Releases page](https://github.com/univpm-br3in/SegMed/releases) and download the **SegMed Setup `.exe`** attached to the v1.5.0 release.
+2. Run the installer. An internet connection is required to download Python and the necessary packages during the initial setup.
+3. Optionally select **Automatically configure supported NVIDIA GPU acceleration**. The installer checks the GPU, driver, and compute capability, selects a compatible PyTorch CUDA build from its supported profiles, and tests GPU execution. If no supported configuration works, it installs CPU-only PyTorch.
+4. When setup finishes, launch **SegMed** from the Start menu or its desktop shortcut (if selected).
 
-### Step 2: Clone the Repository
+The installer creates a private Python 3.11 environment for SegMed. It does not install the full CUDA Toolkit or modify your existing system Python installation. **An NVIDIA graphics driver must already be installed for GPU acceleration.** PyTorch-based inference (including nnU-Net and MONAI) can use the selected GPU when supported; TensorFlow inference uses the CPU in this native-Windows installer.
+
+The GPU selector currently targets tested **PyTorch 2.8.0 CUDA 12.8 and 12.6** builds. Other NVIDIA configurations may use CPU instead. Successful GPU setup does not guarantee every model will fit in GPU memory.
+
+If installation or dependency setup fails, see [Troubleshooting](#troubleshooting).
+
+### Installation from source
+
+Source installation remains available for researchers who want to manage or modify their dependencies. SegMed's Python version and dependencies are specified in `.python-version`, `pyproject.toml`, and `uv.lock`.
+
+**Requirements:** Python 3.11 and the [`uv` package manager](https://docs.astral.sh/uv/). On Windows, install `uv` using its [official instructions](https://docs.astral.sh/uv/getting-started/installation/).
+
 ```bash
 git clone https://github.com/univpm-br3in/SegMed.git
 cd SegMed
+uv sync --locked
+uv run --no-sync python main.py
 ```
 
-### Step 3: Run the main.py file
-```bash
-uv run main.py
-```
-On the first run, uv will create a virtual environment and install the dependencies specified in pyproject.toml. This may take several minutes. Subsequent runs will normally start much faster because the environment and downloaded packages are reused.
+On the first `uv sync`, dependencies are downloaded and a local `.venv` environment is created. Run SegMed from the repository directory so application resources are found correctly.
+
+**Manual GPU setup:** The source installation uses the packages resolved in `uv.lock`; it does **not** run the Windows installer's hardware-aware PyTorch selector. If you need a different PyTorch CUDA build, consult the [official PyTorch instructions](https://pytorch.org/get-started/locally/) and manage that environment explicitly. Subsequent `uv sync` or ordinary `uv run` operations can replace manually installed PyTorch wheels with the versions recorded in the lockfile. The Windows installer handles the supported CUDA profiles separately.
+
+There is no `Start.bat` launcher. Run from source with `uv run --no-sync python main.py`, or use the Windows-installed shortcut.
 
 ---
-### 🚀 GPU Acceleration
 
-SegMed includes both PyTorch and TensorFlow. By default, the project installs the standard versions specified in `pyproject.toml`. CPU inference is supported without additional configuration.
+## ⚡ GPU Acceleration
 
-GPU acceleration is not configured automatically because the required packages depend on:
+| Inference backend | Windows installer: CPU | Windows installer: NVIDIA GPU |
+|---|---|---|
+| PyTorch | Supported | Supported on compatible hardware |
+| nnU-Net V1/V2 | Supported | Through CUDA-enabled PyTorch |
+| MONAI | Supported | Through CUDA-enabled PyTorch |
+| Keras / TensorFlow | Supported | **Not supported on native Windows** |
 
-* The operating system
-* The GPU manufacturer and model
-* The installed GPU driver
-* CUDA compatibility
-* The selected deep-learning framework
+### PyTorch and NVIDIA GPUs
 
-#### PyTorch GPU Support
+On Windows, the installer inspects NVIDIA hardware and the installed driver, then attempts a compatible precompiled PyTorch CUDA distribution. It verifies GPU operation before selecting that backend. If the GPU or driver does not match a supported configuration, or verification fails, installation falls back to CPU inference.
 
-To use an NVIDIA GPU with PyTorch, install a CUDA-enabled build of `torch` and `torchvision` that is compatible with your system. Follow the official PyTorch installation instructions when selecting the appropriate CUDA version.
-
-Verify the PyTorch configuration with:
+To verify PyTorch in a **source** installation:
 
 ```bash
-uv run python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+uv run --no-sync python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA available:', torch.cuda.is_available()); print('Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 ```
 
-#### TensorFlow GPU Support
+For the **Windows installer**, use the Start menu's environment repair/reconfiguration entries if you need to retry GPU setup. Do not run `uv sync` inside the installed application directory, as it may replace the installer-selected CUDA wheels.
 
-TensorFlow GPU support depends on the operating system.
+### TensorFlow on Windows: CPU only
 
-**Linux or Windows with WSL2**
+**SegMed's native-Windows installer does not support GPU inference with TensorFlow.** This is a TensorFlow platform limitation, not a SegMed-specific error: **TensorFlow 2.10 was the last release with native-Windows NVIDIA CUDA support.** Official CUDA GPU support for TensorFlow 2.11 and later is provided through Linux or Windows Subsystem for Linux 2 (WSL2), rather than native Windows.
 
-For NVIDIA GPU support, install TensorFlow together with its CUDA dependencies:
+SegMed uses a newer TensorFlow version, so **Keras and TensorFlow SavedModel inference on native Windows runs on the CPU**, even if a compatible NVIDIA GPU is present and PyTorch can use it. WSL2/Linux GPU configurations are outside the scope of this Windows installer.
+
+See [TensorFlow's official installation documentation](https://www.tensorflow.org/install/pip) for supported GPU environments.
+
+To inspect TensorFlow devices in a source installation:
 
 ```bash
-uv add "tensorflow[and-cuda]>=2.20.0"
+uv run --no-sync python -c "import tensorflow as tf; print('TensorFlow:', tf.__version__); print('Visible GPUs:', tf.config.list_physical_devices('GPU'))"
 ```
 
-An appropriate NVIDIA driver must already be installed on the host system. The required CUDA runtime libraries are then installed in the project environment.
-
-**Native Windows**
-
-TensorFlow 2.10 was the last release that supported NVIDIA CUDA acceleration directly on native Windows. Because SegMed uses TensorFlow 2.20 or later, Windows users must run SegMed through WSL2 to use an NVIDIA GPU with TensorFlow.
-
-Running TensorFlow 2.20 directly on native Windows will use the CPU.
-
-**macOS**
-
-CUDA acceleration is not available on macOS. Apple Silicon users may configure TensorFlow acceleration separately using Apple’s Metal plugin.
-
-Verify whether TensorFlow can access a GPU with:
-
-```bash
-uv run python -c "import tensorflow as tf; print('TensorFlow version:', tf.__version__); print('GPU devices:', tf.config.list_physical_devices('GPU'))"
-```
-
-A correctly configured TensorFlow GPU environment should return at least one device in the `GPU devices` list.
-
-> **Note:** PyTorch and TensorFlow use separate GPU configurations. Successfully enabling GPU acceleration for one framework does not necessarily mean that the other framework is also configured correctly. If no compatible GPU is detected, SegMed will fall back to CPU execution, which may result in slower inference.
+**Note:** PyTorch and TensorFlow have independent GPU support. Enabling GPU acceleration for PyTorch does not enable TensorFlow GPU inference on native Windows.
 
 ---
 
@@ -175,9 +175,8 @@ A correctly configured TensorFlow GPU environment should return at least one dev
 ### Basic Workflow
 
 1. **Launch the Application**
-   ```bash
-   uv run main.py
-   ```
+   - Windows installer: open **SegMed** from the Start menu or desktop shortcut.
+   - Source installation: run `uv run --no-sync python main.py` from the repository directory.
 
 
 2. **Load a Neural Network Model**
@@ -202,7 +201,7 @@ A correctly configured TensorFlow GPU environment should return at least one dev
 
 6. **Run Segmentation**
    - Click "Segment!"
-   - Choose processing mode (CPU/GPU)
+   - Select an available execution device (GPU support depends on the installed backend)
    - Wait for inference to complete
 
 7. **Visualize Results**
@@ -251,9 +250,13 @@ A correctly configured TensorFlow GPU environment should return at least one dev
 - **Requirements**: Model must have defined input shape
 
 ### Keras/TensorFlow Models
-- **Saved Models**: `.h5`, `.keras` files
-- **Architecture Files**: `.json` (with weights) or `.yaml` (with weights)
-- **Custom Objects**: Automatic handling of custom layers/losses
+- **Keras Models**: `.h5` and `.keras` files
+- **TensorFlow SavedModel**: A SavedModel directory containing `saved_model.pb` and its `variables/` directory; **the `.pb` file alone is not sufficient**
+- **Architecture Files**: `.json` or `.yaml`, with the required weights
+- **Model Requirements**: Custom layers/objects and expected preprocessing must be compatible with the installed TensorFlow version
+- **Input Channels**: Standalone inference currently supports single-channel medical images; models requiring multiple distinct input channels are not supported automatically
+
+**2D networks** can be applied slice by slice to a 3D image. SegMed does not currently provide a dedicated time-series/video segmentation workflow.
 
 ### MONAI Bundles
 - **Structure**: Folder with `configs/` and `models/` directories
@@ -296,7 +299,7 @@ Resamples to uniform voxel spacing:
 Input: target_spacing (or current + target)
 ```
 
-**Note**: Preprocessing options can be combined and are applied in order.
+**Note:** Isotropic resampling, when enabled, is performed before fitting images to a standalone model's input shape. Smaller spatial dimensions are zero-padded; larger dimensions require a crop position choice. The predicted segmentation is mapped back using the inverse crop/pad offsets, with nearest-neighbor interpolation when reversing resampling. Areas excluded by cropping cannot be recovered and remain background. Always use the preprocessing expected by the trained model.
 
 ---
 
@@ -335,25 +338,6 @@ When both ground truth and predicted segmentations are loaded:
 - Overall and per-class scores
 - Scrollable for many classes
 
----
-
-## 📊 Performance Metrics
-
-### DICE Coefficient (Sørensen-Dice Index)
-Measures overlap similarity between segmentations:
-```
-DICE = 2 × |GT ∩ Pred| / (|GT| + |Pred|)
-```
-- Range: 0.0 (no overlap) to 1.0 (perfect match)
-- More forgiving to size differences
-
-### IoU (Intersection over Union / Jaccard Index)
-Measures intersection relative to union:
-```
-IoU = |GT ∩ Pred| / |GT ∪ Pred|
-```
-- Range: 0.0 (no overlap) to 1.0 (perfect match)
-- Stricter metric than DICE
 
 ---
 
@@ -379,70 +363,20 @@ SegMed/
 │       ├── icon.ico                 # Application icon
 │       ├── Segmed.png              # Logo
 │       └── univpm.png              # University logo
-├── pyproject.toml                   # uv/pip configuration
+├── installer/                       # Windows installer source and setup scripts
+│   ├── segmed.iss                   # Inno Setup configuration
+│   ├── prepare_windows.ps1          # Download uv for installer compilation
+│   ├── install_dependencies.ps1     # Dependency installation and GPU setup
+│   └── select_torch_backend.py      # NVIDIA hardware detection
+├── launcher.py                      # Installed Windows application launcher
+├── pyproject.toml                   # Project dependencies
+├── uv.lock                          # Locked dependency versions
+├── .python-version                  # Python version
 ├── README.md                        # This file
 └── LICENSE                          # License file
 ```
 
----
 
-## 🎯 Tips & Best Practices
-
-### Model Selection
-- **nnU-Net**: Best for standard medical imaging tasks
-- **MONAI**: Good for research and custom architectures
-- **Custom PyTorch/Keras**: When you have specific requirements
-
-### Preprocessing
-- **nnU-Net Models**: Don't add extra preprocessing (already included)
-- **Custom Models**: Apply preprocessing used during training
-- **Isotropic Resampling**: Use for anisotropic scans (different spacing per axis)
-
-### GPU Usage
-- Enable GPU for faster inference.
-- You need to install CUDA and related package depending on your system
-- CPU mode works but is slower for large volumes
-- nnU-Net benefits significantly from GPU acceleration
-
-### Visualization
-- Adjust window/level for better tissue contrast, or use None option.
-- Use comparison mode to validate predictions
-- Check all three orthogonal views for complete assessment
-
-### Export
-- Save segmentations immediately after successful inference
-- Use multi-file export for separate class processing
-- OBJ format is more compatible with 3D software
-
----
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-**"No GPU available" warning**
-- Install CUDA-compatible PyTorch: `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118`
-- Or use CPU mode (slower but functional)
-
-**Model loading fails**
-- Check model format compatibility
-- Ensure all required files are present (weights, config, etc.)
-- For nnU-Net, verify folder structure
-
-**Segmentation looks wrong**
-- Verify correct preprocessing was applied
-- Check if model expects specific input dimensions
-- Confirm image orientation is correct
-
-**3D visualization is slow**
-- Reduce number of enabled classes
-- Close other 3D applications
-- Use simpler mesh export settings
-
-**Metrics show zero**
-- Ensure both GT and predicted segmentations are loaded
-- Check that segmentations have matching dimensions
-- Verify segmentation labels are > 0 (background is 0)
 
 ---
 
@@ -471,13 +405,15 @@ If you use SegMed in your research, please cite the following paper:
 Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
 
 ### Development Setup
+
 ```bash
-git clone https://github.com/yourusername/SegMed.git
+git clone https://github.com/univpm-br3in/SegMed.git
 cd SegMed
-uv venv
-source .venv/bin/activate  # or .venv\Scripts\activate on Windows
-uv pip install -e ".[dev]"
+uv sync --locked
+uv run --no-sync python main.py
 ```
+
+The installer build configuration is stored in `installer/`. See `installer/README_INSTALLER.md` for Windows packaging instructions. Avoid committing generated installer binaries, virtual environments, or build directories to the source repository.
 
 ### Code Style
 - Follow PEP 8 guidelines
@@ -511,14 +447,19 @@ The authors assume **no responsibility or liability** for any use of this softwa
 
 ## 🔄 Version History
 
-### Version 1.0.1 (Current)
-- ✅ Fixed Windowing bug
+### Version 1.5.0 (Current)
+- Added a Windows installer with a private Python environment and automated dependency installation using `uv`.
+- Added automatic NVIDIA GPU detection and selection of supported PyTorch CUDA 12.8/12.6 builds, with a CPU fallback.
+- Added support for TensorFlow SavedModel directories (`saved_model.pb` and `variables/`).
+- Improved spatial input-size handling through symmetric zero-padding, configurable cropping, and inverse restoration of segmentations.
+- Improved isotropic-resampling order and segmentation restoration, including nearest-neighbor interpolation for masks.
+- Removed the legacy `Start.bat` launcher; Windows users can use the installer and source users can launch through `uv`.
+- Clarified the native-Windows TensorFlow GPU limitation.
 
-### Version 1.0.0 (Current)
-- ✅ Multi-framework model support (nnU-Net V1/V2, PyTorch, Keras, MONAI)
-- ✅ 2D/3D visualization with comparison mode
-- ✅ Comprehensive preprocessing pipeline
-- ✅ DICE and IoU metrics calculation
-- ✅ Mesh export (STL/OBJ)
-- ✅ DICOM and NIfTI support
-- ✅ Interactive color customization
+### Version 1.0.1
+- Fixed windowing behavior.
+
+### Version 1.0.0
+- Initial multi-framework support (nnU-Net V1/V2, PyTorch, Keras, MONAI).
+- 2D/3D visualization and comparison mode.
+- Preprocessing, Dice and IoU metrics, NIfTI export, STL/OBJ mesh export, DICOM support, and color customization.
