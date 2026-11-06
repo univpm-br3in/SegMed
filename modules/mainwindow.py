@@ -939,7 +939,7 @@ class MainWindow(QMainWindow):
             affine[:3, 3] = self.image.get_origin()
             nii_img = nib.Nifti1Image(
                 self.image.get_pre_segmentation(), affine)
-            nib.save(nii_img, "output.nii.gz")
+            nib.save(nii_img, file_path)
 
     def open_color_selection(self):
         numOfClasses = self.image.get_num_of_classes()

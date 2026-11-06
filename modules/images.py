@@ -91,6 +91,7 @@ class Image:
 
         elif image_path.endswith('.npy'):
             self.image_data = np.load(image_path)
+            self.image_data = np.squeeze(self.image_data)
             
             # Try to load metadata from sidecar JSON file if it exists
             json_path = image_path.replace('.npy', '.json')
