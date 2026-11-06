@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 import tempfile
 import SimpleITK as sitk
+from glob import glob
 
 # Suppress nnU-Net environment warnings (not needed for inference-only usage)
 # These paths are only required for training/preprocessing, not for running predictions
@@ -42,7 +43,7 @@ class NnUNetV2Handler:
         folder/
         ├── plans.json (or nnUNetPlans.json)  ← REQUIRED
         └── fold_X/
-            └── checkpoint_final.pth (or checkpoint_best.pth)  ← REQUIRED
+            └── *.pth ← REQUIRED
         
         Optional:
         ├── dataset.json  ← OPTIONAL (provides class labels/metadata)
@@ -62,11 +63,12 @@ class NnUNetV2Handler:
         
         # Check if at least one fold has a checkpoint
         for fold_dir in fold_dirs:
-            checkpoint_final = fold_dir / "checkpoint_final.pth"
-            checkpoint_best = fold_dir / "checkpoint_best.pth"
-            if checkpoint_final.exists() or checkpoint_best.exists():
+            checkpoint = glob(str(fold_dir / "*.pth"))
+            if checkpoint:
+                print(f"Found checkpoint in {fold_dir}")
                 return True
-        
+            
+        print("No checkpoints found in any fold directories")
         return False
     
     def load_nnunet_model(self, folder_path: str, device: torch.device, 
@@ -80,7 +82,7 @@ class NnUNetV2Handler:
             device: torch device (cpu or cuda)
             folds: Tuple of folds to use (e.g., (0,) or (0, 1, 2, 3, 4) for ensemble)
                   If None, will use fold_0 by default
-            checkpoint_name: Name of checkpoint to load ('checkpoint_final.pth' or 'checkpoint_best.pth')
+            checkpoint_name: Name of checkpoint
         
         Returns:
             True if successful, False otherwise
