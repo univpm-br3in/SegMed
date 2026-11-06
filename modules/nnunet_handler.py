@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 import tempfile
 import SimpleITK as sitk
-from glob import glob
 
 # Suppress nnU-Net environment warnings (not needed for inference-only usage)
 # These paths are only required for training/preprocessing, not for running predictions
@@ -43,7 +42,7 @@ class NnUNetV2Handler:
         folder/
         ├── plans.json (or nnUNetPlans.json)  ← REQUIRED
         └── fold_X/
-            └── *.pth ← REQUIRED
+            └── checkpoint_final.pth (or checkpoint_best.pth)  ← REQUIRED
         
         Optional:
         ├── dataset.json  ← OPTIONAL (provides class labels/metadata)
@@ -54,21 +53,23 @@ class NnUNetV2Handler:
         plans_json = folder / "plans.json"
         alt_plans_json = folder / "nnUNetPlans.json"
         if not plans_json.exists() and not alt_plans_json.exists():
+            print (f"✗ Missing plans.json or nnUNetPlans.json in {folder_path}")
             return False
         
         # Check for at least one fold directory with checkpoint (REQUIRED)
         fold_dirs = list(folder.glob("fold_*"))
         if not fold_dirs:
+            print(f"✗ No fold directories found in {folder_path}")
             return False
         
         # Check if at least one fold has a checkpoint
         for fold_dir in fold_dirs:
-            checkpoint = glob(str(fold_dir / "*.pth"))
-            if checkpoint:
-                print(f"Found checkpoint in {fold_dir}")
+            checkpoint_final = fold_dir / "checkpoint_final.pth"
+            checkpoint_best = fold_dir / "checkpoint_best.pth"
+            if checkpoint_final.exists() or checkpoint_best.exists():
                 return True
-            
-        print("No checkpoints found in any fold directories")
+            print(f"✗ No checkpoint found in {fold_dir}")
+        
         return False
     
     def load_nnunet_model(self, folder_path: str, device: torch.device, 
@@ -82,7 +83,7 @@ class NnUNetV2Handler:
             device: torch device (cpu or cuda)
             folds: Tuple of folds to use (e.g., (0,) or (0, 1, 2, 3, 4) for ensemble)
                   If None, will use fold_0 by default
-            checkpoint_name: Name of checkpoint
+            checkpoint_name: Name of checkpoint to load ('checkpoint_final.pth' or 'checkpoint_best.pth')
         
         Returns:
             True if successful, False otherwise
@@ -231,11 +232,11 @@ class NnUNetV2Handler:
         - Resampling back to original spacing
         
         Args:
-            image: Input image array (H, W, D) or (D, H, W)
-            spacing: Voxel spacing tuple (sx, sy, sz)
-            origin: Image origin tuple (ox, oy, oz). If None, defaults to (0, 0, 0)
-            direction: Direction cosine matrix (3x3 or flattened 9-element array). 
-                      If None, defaults to identity (RAS orientation)
+            image: Input image array in (x, y, z) order
+            spacing: Voxel spacing (sx, sy, sz)
+            origin: Image origin in physical (x, y, z) coordinates
+            direction: Direction cosine matrix (3x3 or flattened 9-element array)
+                       in ITK/LPS coordinates
             properties: Optional properties dict (if None, will be auto-generated)
         
         Returns:
@@ -272,23 +273,23 @@ class NnUNetV2Handler:
                 if origin is None:
                     origin = (0.0, 0.0, 0.0)
                 if direction is None:
-                    direction = np.eye(3)  # Identity matrix (RAS orientation)
-                
-                # Ensure direction is a 3x3 matrix
-                if isinstance(direction, (list, tuple)):
-                    if len(direction) == 9:
-                        # Flatten array to 3x3
-                        direction = np.array(direction).reshape(3, 3)
-                    elif len(direction) != 9:
-                        raise ValueError(f"Direction must be 3x3 matrix or 9-element array, got {len(direction)} elements")
-                
-                # Convert direction matrix to ITK format (flattened row-major)
-                direction_itk = direction.flatten().tolist()
-                
-                # Convert numpy array to SimpleITK image
-                sitk_image = sitk.GetImageFromArray(image)
-                sitk_image.SetSpacing(spacing[::-1])  # ITK uses (z, y, x) order
-                sitk_image.SetOrigin(origin[::-1] if len(origin) == 3 else origin)  # ITK uses (z, y, x) order
+                    direction = np.eye(3)
+
+                if np.asarray(image).ndim != 3:
+                    raise ValueError(f"Expected a 3D image, got {np.asarray(image).shape}")
+
+                spacing = tuple(float(v) for v in spacing)
+                origin = tuple(float(v) for v in origin)
+                direction = np.asarray(direction, dtype=float).reshape(3, 3)
+                direction_itk = direction.ravel().tolist()
+
+                # SegMed uses (x, y, z); SimpleITK reads NumPy arrays as (z, y, x).
+                image_zyx = np.ascontiguousarray(
+                    np.asarray(image, dtype=np.float32).transpose(2, 1, 0)
+                )
+                sitk_image = sitk.GetImageFromArray(image_zyx)
+                sitk_image.SetSpacing(spacing)
+                sitk_image.SetOrigin(origin)
                 sitk_image.SetDirection(direction_itk)
                 
                 print(f"  Image metadata:")
@@ -306,7 +307,7 @@ class NnUNetV2Handler:
                 
                 self.predictor.predict_from_files(
                     [[str(input_file)]],  # List of cases, each with list of modality files
-                    [str(output_dir)],    # Output directory (separate from input)
+                    [str(output_dir)],    # Output filename prefix
                     save_probabilities=False,
                     overwrite=True,
                     num_processes_preprocessing=1,
@@ -323,10 +324,8 @@ class NnUNetV2Handler:
                 time.sleep(1.0)  # Increased wait time
                 
                 # Load the result
-                # CRITICAL: nnU-Net creates output files in the PARENT directory of output_dir,
-                # with the filename matching the OUTPUT FOLDER NAME!
-                # Example: if output_dir = /tmp/xyz123/output/
-                #          then output file = /tmp/xyz123/output.nii.gz (NOT /tmp/xyz123/output/temp_input.nii.gz)
+                # The list-based output argument is a filename prefix, not a folder.
+                # The requested prefix here produces temp_dir/output.nii.gz.
                 
                 # First, check both possible locations
                 print(f"  Searching for output file...")
@@ -462,6 +461,15 @@ class NnUNetV2Handler:
                         print(f"\n  ✗ Could not find valid segmentation file!")
                         print(f"  ✗ All files in temp tree: {[str(f.relative_to(temp_dir)) for f in all_temp_files if f.is_file()]}")
                 
+                # Convert the SimpleITK array back to SegMed's (x, y, z) order.
+                expected_shape = tuple(np.asarray(image).shape[::-1])
+                if segmentation.shape != expected_shape:
+                    raise ValueError(
+                        f"Unexpected output shape {segmentation.shape}; "
+                        f"expected {expected_shape} in SimpleITK order"
+                    )
+                segmentation = np.ascontiguousarray(segmentation.transpose(2, 1, 0))
+
                 print(f"\n✓ Inference complete")
                 print(f"  Final output file: {output_file.relative_to(temp_dir) if output_file.is_relative_to(temp_dir) else output_file.name}")
                 print(f"  Output shape: {segmentation.shape}")
