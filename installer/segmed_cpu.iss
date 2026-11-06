@@ -1,5 +1,5 @@
 #define MyAppName "SegMed"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "1.5.0"
 
 [Setup]
 AppId={{6FBD9B18-94D4-40AA-95CA-1162E79418F9}
