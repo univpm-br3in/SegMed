@@ -7,8 +7,7 @@ import pydicom
 from pydicom.pixels import apply_modality_lut
 import os
 from modules.dicomSeriesSelectionDialog import DicomSeriesSelectionDialog
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TF info messages
-
+from scipy import ndimage
 
 class Image:
     def __init__(self, ww, wl):
@@ -621,6 +620,7 @@ class Image:
                 self.GT_segmentation = np.squeeze(self.GT_segmentation[:, :, :, 0])
                 self.num_of_class = len(np.unique(self.GT_segmentation))
                 return True
+        print(f"Segmentation shape {self.GT_segmentation.shape} does not match image shape {shape}.")
         self.GT_segmentation = None
         return False
 
@@ -710,6 +710,106 @@ class Image:
             proceessed_image = np.expand_dims(
                 proceessed_image, axis=-1) if append == "append_last" else np.expand_dims(self.image_data, axis=0)
         return proceessed_image
+
+    @staticmethod
+    def fit_to_model_shape(image_data, required_shape, crop_positions=None):
+        """Fit spatial dimensions by cropping or zero-padding."""
+        image_data = np.asarray(image_data)
+        required_shape = tuple(required_shape)
+        crop_positions = crop_positions or {}
+
+        if image_data.ndim != 3 or len(required_shape) not in (2, 3):
+            raise ValueError("Expected a 3D volume and a 2D or 3D spatial shape")
+
+        slices = []
+        padding = []
+        axes = []
+        for axis, current in enumerate(image_data.shape):
+            target = required_shape[axis] if axis < len(required_shape) else current
+            target = current if target is None else int(target)
+            if target <= 0:
+                raise ValueError(f"Invalid size on axis {axis}: {target}")
+
+            crop_start = 0
+            pad_before = 0
+            pad_after = 0
+            if current > target:
+                position = crop_positions.get(axis, "center")
+                difference = current - target
+                if position == "start":
+                    crop_start = 0
+                elif position == "center":
+                    crop_start = difference // 2
+                elif position == "end":
+                    crop_start = difference
+                else:
+                    raise ValueError(f"Invalid crop position: {position}")
+            elif current < target:
+                difference = target - current
+                pad_before = difference // 2
+                pad_after = difference - pad_before
+
+            crop_end = crop_start + min(current, target)
+            slices.append(slice(crop_start, crop_end))
+            padding.append((pad_before, pad_after))
+            axes.append({
+                "input_length": current,
+                "crop_start": crop_start,
+                "crop_end": crop_end,
+                "pad_before": pad_before,
+                "pad_after": pad_after,
+            })
+
+        fitted = np.pad(
+            image_data[tuple(slices)],
+            padding,
+            mode="constant",
+            constant_values=0,
+        )
+        transform = {
+            "original_shape": tuple(image_data.shape),
+            "fitted_shape": tuple(fitted.shape),
+            "axes": axes,
+        }
+        return fitted, transform
+
+    @staticmethod
+    def restore_from_model_shape(segmentation, transform):
+        """Undo the recorded crop and padding without stretching labels."""
+        segmentation = np.asarray(segmentation)
+        if tuple(segmentation.shape) != transform["fitted_shape"]:
+            raise ValueError(
+                f"Prediction shape {segmentation.shape} does not match "
+                f"model input shape {transform['fitted_shape']}"
+            )
+
+        unpad_slices = []
+        destination_slices = []
+        for axis in transform["axes"]:
+            start = axis["pad_before"]
+            end = segmentation.shape[len(unpad_slices)] - axis["pad_after"]
+            unpad_slices.append(slice(start, end))
+            destination_slices.append(slice(axis["crop_start"], axis["crop_end"]))
+
+        restored = np.zeros(transform["original_shape"], dtype=segmentation.dtype)
+        restored[tuple(destination_slices)] = segmentation[tuple(unpad_slices)]
+        return restored
+
+    @staticmethod
+    def restore_resampled_segmentation(segmentation, original_shape):
+        """Map labels back to the original voxel grid using nearest neighbors."""
+        segmentation = np.asarray(segmentation)
+        original_shape = tuple(original_shape)
+        if tuple(segmentation.shape) == original_shape:
+            return segmentation
+        if segmentation.ndim != 3 or len(original_shape) != 3:
+            raise ValueError("Expected 3D segmentation and target shape")
+        zoom_factors = [target / current for current, target in
+                        zip(segmentation.shape, original_shape)]
+        restored = ndimage.zoom(segmentation, zoom_factors, order=0, mode="nearest")
+        if tuple(restored.shape) != original_shape:
+            raise ValueError(f"Resampling produced unexpected shape: {restored.shape}")
+        return restored.astype(segmentation.dtype, copy=False)
 
     def crop_image(self, start1, end1, start2, end2, start3, end3):
         """
@@ -856,17 +956,31 @@ class Image:
         """Get whether coronal view needs rotation"""
         return getattr(self, 'needs_coronal_rotation', False)
 
-    def set_pre_segmentation(self, pre_seg, netwoerkType):
-        if netwoerkType == "2D":
-            resized_mask = self.resize_volume_slices(
-                pre_seg, (self.width, self.hight))
+    def set_pre_segmentation(self, pre_seg, netwoerkType, strict=False):
+        """Store a segmentation in the original image voxel grid."""
+        pre_seg = np.asarray(pre_seg)
+        target_shape = (self.hight, self.width, self.slices)
+        if pre_seg.ndim != 3:
+            raise ValueError(f"Expected a 3D segmentation, got {pre_seg.shape}")
+
+        if tuple(pre_seg.shape) == target_shape:
+            resized_mask = pre_seg
+        elif strict:
+            raise ValueError(
+                f"Segmentation shape {pre_seg.shape} does not match image {target_shape}"
+            )
+        elif netwoerkType == "2D":
+            resized_mask = self.resize_volume_slices(pre_seg, (self.width, self.hight))
         elif netwoerkType == "3D":
             resized_mask = resize(
-                pre_seg, (self.hight, self.width, self.slices), order=0, preserve_range=True, anti_aliasing=False).astype(pre_seg.dtype)
+                pre_seg, target_shape, order=0,
+                preserve_range=True, anti_aliasing=False
+            ).astype(pre_seg.dtype)
+        else:
+            raise ValueError(f"Unknown network dimensionality: {netwoerkType}")
 
         self.pre_segmentation = resized_mask
-        if self.num_of_class is None:
-            self.num_of_class = len(np.unique(self.pre_segmentation))
+        self.num_of_class = len(np.unique(resized_mask))
 
     def resize_volume_slices(self, volume, new_size):
         """

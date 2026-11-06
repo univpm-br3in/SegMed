@@ -2,7 +2,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QPushButton, QRadioButton,
     QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QSlider,
     QGroupBox, QComboBox, QFileDialog,
-    QDialog, QScrollArea
+    QDialog, QDialogButtonBox, QScrollArea
 )
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QImage, QPixmap, QColor, QIcon
@@ -18,6 +18,7 @@ import nibabel as nib
 import os
 import sys
 import scipy.ndimage as ndimage
+import copy
 
 
 from modules import images
@@ -27,6 +28,8 @@ from modules.colorselectionwindow import ColorSelectionWindow
 from modules.preprocessingwindow import PreProcessingWindow
 from modules.preprocessingexecutor import PreprocessingExecutor
 from modules.networkdimensioninputwindow import NetworkDimensionInputWindow
+
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TF info messages
 
 
 class MainWindow(QMainWindow):
@@ -422,7 +425,7 @@ class MainWindow(QMainWindow):
             'Load Network',
             'Load single file or folder?\n\n'
             'YES - Single file (.ts, .pth, .pt, .h5, .keras, .json, .yaml)\n'
-            'NO - Folder (MONAI Bundle or nnU-Net V2/V1)',
+            'NO - Folder (MONAI Bundle, nnU-Net V2/V1, or TensorFlow SavedModel)',
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes
         )
@@ -493,7 +496,7 @@ class MainWindow(QMainWindow):
         else:  # User selected NO - load folder
             # Load folder (could be MONAI or nnU-Net)
             dir_path = QFileDialog.getExistingDirectory(
-                self, "Select Model Directory (MONAI Bundle or nnU-Net V1/V2)", ""
+                self, "Select Model Directory (MONAI, nnU-Net, or TensorFlow SavedModel)", ""
             )
             if not dir_path:
                 return
@@ -506,10 +509,10 @@ class MainWindow(QMainWindow):
                     self.cpu_radio.setChecked(True)
             else:
                 self.network.set_processing_type("cpu")
-            # Auto-detect if it's MONAI or nnU-Net (returns tuple: (is_nnunet, version))
-            is_nnunet, nnunet_version = self.network._is_nnunet_folder(
-                dir_path)
+            # Identify the framework from the selected model directory.
+            is_nnunet, nnunet_version = self.network._is_nnunet_folder(dir_path)
             is_monai = self.network._is_monai_bundle(dir_path)
+            is_tensorflow = self.network._is_tensorflow_saved_model(dir_path)
 
             if is_nnunet:
                 # Load as nnU-Net (V1 or V2 auto-detected)
@@ -542,14 +545,25 @@ class MainWindow(QMainWindow):
                     self.show_warning(
                         "Failed to load MONAI bundle. Please check the bundle directory.")
 
+            elif is_tensorflow:
+                try:
+                    if self.network.load_model(dir_path):
+                        self.segment_btn.setEnabled(True)
+                        self.show_warning(
+                            "TensorFlow SavedModel loaded successfully!\n"
+                            f"Input dimensions: {self.network.input_dims}\n"
+                            f"Input shape: {self.network.input_shape}"
+                        )
+                except Exception as exc:
+                    self.show_warning(f"Failed to load TensorFlow SavedModel: {exc}")
             else:
-                # Unknown folder structure
                 self.show_warning(
                     "Could not detect model type in selected directory.\n\n"
                     "Expected:\n"
                     "- MONAI Bundle: configs/ and models/ directories\n"
                     "- nnU-Net V2: plans.json and fold_X/ directories\n"
-                    "- nnU-Net V1: plans.pkl and fold_X/ directories\n\n"
+                    "- nnU-Net V1: plans.pkl and fold_X/ directories\n"
+                    "- TensorFlow SavedModel: saved_model.pb\n\n"
                     "Please select a valid model directory.")
 
     def load_image(self):
@@ -643,7 +657,7 @@ class MainWindow(QMainWindow):
             self.update_metrics_display()
 
     def run_segmentation(self):
-        # First check if a model and image are loaded
+        """Run inference and restore predictions to the loaded image geometry."""
         if self.network.model is None:
             self.show_warning("No neural network model loaded!")
             return
@@ -651,176 +665,213 @@ class MainWindow(QMainWindow):
             self.show_warning("No image loaded!")
             return
 
-        # Determine processing mode
-        if self.gpu_radio.isChecked():
-            if (torch.cuda.is_available() or tf.config.list_physical_devices('GPU')):
-                self.network.set_processing_type("gpu")
+        try:
+            if self.gpu_radio.isChecked():
+                if self.network.model_type in ("keras", "tensorflow_saved_model"):
+                    gpu_available = bool(tf.config.list_physical_devices("GPU"))
+                else:
+                    gpu_available = torch.cuda.is_available()
+                if gpu_available:
+                    self.network.set_processing_type("gpu")
+                else:
+                    self.show_warning("No GPU available, switching to CPU mode.")
+                    self.network.set_processing_type("cpu")
+                    self.cpu_radio.setChecked(True)
             else:
-                self.show_warning("No GPU available, switching to CPU mode.")
                 self.network.set_processing_type("cpu")
-                self.cpu_radio.setChecked(True)
+
+            if self.network.model_type in ("monai", "nnunet"):
+                prediction = self.network.get_prediction(
+                    self.image.get_image_data(),
+                    spacing=self.image.get_image_spacing(),
+                    origin=self.image.get_origin(),
+                    direction=self.image.get_direction(),
+                )
+                self.image.set_pre_segmentation(prediction, "3D")
+            else:
+                if not self._run_generic_segmentation():
+                    return
+
+            self._complete_segmentation()
+        except Exception as exc:
+            self.show_warning(f"Segmentation failed: {exc}")
+            import traceback
+            traceback.print_exc()
+
+    def _get_generic_preprocessing_options(self):
+        """Apply image-specific spacing while retaining the chosen target spacing."""
+        options = copy.deepcopy(self.preprocssing_options or {})
+        isotropic = options.get("Isotropic Resampling")
+        target_spacing = None
+        if isotropic and isotropic.get("enabled", False):
+            values = isotropic.get("values")
+            values = [] if values is None else list(values)
+            if len(values) == 1:
+                target_spacing = float(values[0])
+            elif len(values) == 4:
+                target_spacing = float(values[3])
+            elif len(values) in (0, 3):
+                target_spacing = 1.0
+            else:
+                raise ValueError(
+                    "Isotropic resampling expects a target spacing or three original spacings"
+                )
+            isotropic["values"] = [
+                *[float(x) for x in self.image.get_image_spacing()], target_spacing
+            ]
+        return options, target_spacing
+
+    def _get_crop_preferences(self, image_shape, required_shape):
+        """Ask which side to preserve along axes that require cropping."""
+        crop_axes = [
+            (axis, current, int(required_shape[axis]))
+            for axis, current in enumerate(image_shape[:len(required_shape)])
+            if required_shape[axis] is not None and current > required_shape[axis]
+        ]
+        if not crop_axes:
+            return {}
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Confirm Image Cropping")
+        dialog.setMinimumWidth(490)
+        layout = QVBoxLayout(dialog)
+        description = QLabel(
+            "The image is larger than the network input along the axes below. "
+            "Cropping removes image data from the selected side. "
+            "Choose the area to retain, or cancel segmentation."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        orientation = getattr(self.image, "original_orientation", None)
+        anatomical_sides = {
+            "R": ("Left", "Right"), "L": ("Right", "Left"),
+            "A": ("Posterior", "Anterior"), "P": ("Anterior", "Posterior"),
+            "S": ("Inferior", "Superior"), "I": ("Superior", "Inferior"),
+        }
+        selectors = {}
+        for axis, current, required in crop_axes:
+            row = QHBoxLayout()
+            direction = (
+                anatomical_sides.get(orientation[axis])
+                if orientation is not None and len(orientation) > axis else None
+            )
+            axis_label = f"Axis {axis}: {current} to {required} (remove {current-required})"
+            label = QLabel(axis_label)
+            row.addWidget(label)
+            selector = QComboBox()
+            selector.addItem("Keep center", "center")
+            if direction:
+                selector.addItem(f"Keep start (toward {direction[0]})", "start")
+                selector.addItem(f"Keep end (toward {direction[1]})", "end")
+            else:
+                selector.addItem("Keep start (low indices)", "start")
+                selector.addItem("Keep end (high indices)", "end")
+            row.addWidget(selector)
+            layout.addLayout(row)
+            selectors[axis] = selector
+
+        info = QLabel(
+            "Dimensions smaller than the model input will be padded with zeros "
+            "automatically. Cropped regions cannot be recovered after inference."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        return {axis: selector.currentData() for axis, selector in selectors.items()}
+
+    def _run_generic_segmentation(self, manual_shape=None, channel_format=None):
+        """Prepare, fit, predict, and invert transforms for standalone models."""
+        if channel_format in ("channel_first", "channel_last"):
+            self.network.input_channels = channel_format
+        if manual_shape is not None:
+            self.network.input_dims = "3D" if len(manual_shape) == 3 else "2D"
+
+        original = np.asarray(self.image.get_processed_image())
+        if original.ndim != 3:
+            raise ValueError(f"Expected a 3D image, got {original.shape}")
+
+        options, target_spacing = self._get_generic_preprocessing_options()
+        processed = self.executor.execute_preprocessing(original, options) if options else original
+
+        if manual_shape is not None:
+            required = tuple(int(x) for x in manual_shape)
         else:
-            self.network.set_processing_type("cpu")
-            self.cpu_radio.setChecked(True)
-
-        if self.network.model_type == "monai":
-            A = self.network.get_prediction(self.image.get_image_data(),
-                                            spacing=self.image.get_image_spacing(),
-                                            origin=self.image.get_origin(),
-                                            direction=self.image.get_direction())
-            self.image.set_pre_segmentation(A, "3D")
-
-        elif self.network.model_type == "nnunet":
-            A = self.network.get_prediction(self.image.get_image_data(),
-                                            spacing=self.image.get_image_spacing(),
-                                            origin=self.image.get_origin(),
-                                            direction=self.image.get_direction())
-            self.image.set_pre_segmentation(A, "3D")
-
-        else:
-            # Provide missing preprocessing values
-            if self.preprocssing_options:
-                if self.preprocssing_options['Isotropic Resampling']["enabled"]:
-                    self.preprocssing_options['Isotropic Resampling']["values"] = self.image.get_image_spacing(
-                    )
-
-            # Check if the dimensions of the image are compatible with the model
-            is_compatible, neededSize, mode = self.network.check_model_compatibility(
-                self.image.get_image_shape())
-
-            if not is_compatible and neededSize is not None:
-                self.show_warning(
-                    f"Image dimensions {self.image.get_image_shape()} are not compatible with the model, image will be {mode}!")
-
-                resized_image = self.image.resize_image(
-                    neededSize, self.network.input_dims, mode)
-                if "-" in mode:
-                    mode = mode.split("-")[1]
-
-                if self.preprocssing_options:
-                    resized_image = self.executor.execute_preprocessing(
-                        resized_image, self.preprocssing_options)
-
-                self.image.set_pre_segmentation(
-                    self.image.restore_size(self.network.get_prediction(resized_image).squeeze(), mode, self.image.get_image_shape()), self.network.input_dims)
-
-            elif not is_compatible and neededSize is None:
-                # Open manual input dialog
+            compatible, required, reason = self.network.check_model_compatibility(processed.shape)
+            if reason == "unsupported_channels":
+                raise ValueError(
+                    "This model expects multiple input channels. "
+                    "SegMed currently supports single-channel input for standalone models."
+                )
+            if not compatible and required is None:
                 dialog = NetworkDimensionInputWindow(self)
                 dialog.dimensions_configured.connect(
                     lambda dims, channel, mode: self.process_with_manual_dimensions(
-                        dims, channel, mode)
+                        dims, channel, mode
+                    )
                 )
+                dialog.exec()
+                return False
 
-                result = dialog.exec()
-                if result == QDialog.Accepted:
-                    # Processing will be handled by the signal callback
-                    pass
-                else:
-                    # User cancelled
-                    self.show_warning(
-                        "Segmentation cancelled. Please provide network dimensions to proceed.")
-                return
-            else:
-                if self.preprocssing_options:
-                    processed_image = self.executor.execute_preprocessing(
-                        self.image.get_processed_image().squeeze(), self.preprocssing_options)
-                    print(processed_image.max())
-                else:
-                    processed_image = self.image.get_processed_image()
+        if required is None:
+            fitted = processed
+            transform = None
+        else:
+            required = tuple(required)
+            expected_ndim = 2 if self.network.input_dims == "2D" else 3
+            if len(required) != expected_ndim:
+                raise ValueError(
+                    f"Expected {expected_ndim} spatial dimensions, got {required}"
+                )
+            positions = self._get_crop_preferences(processed.shape, required)
+            if positions is None:
+                return False
+            fitted, transform = self.image.fit_to_model_shape(processed, required, positions)
 
-                self.image.set_pre_segmentation(
-                    self.network.get_prediction(processed_image), self.network.input_dims)
+        prediction = self.network.get_prediction(fitted)
+        if transform is not None:
+            prediction = self.image.restore_from_model_shape(prediction, transform)
+        if target_spacing is not None:
+            prediction = self.image.restore_resampled_segmentation(
+                prediction, original.shape
+            )
+        self.image.set_pre_segmentation(prediction, self.network.input_dims, strict=True)
+        return True
 
+    def _complete_segmentation(self):
+        """Update the SegMed views after inference."""
         self.mesh.create_faces_triangles_pre(self.image.get_pre_segmentation())
         self.open_color_selection()
-
-        # Create cached predicted meshes
         self.create_pre_meshes()
         self.mesh_items = self.pre_mesh_items
-
         self.color_mesh()
-
         self.pre_radio.setChecked(True)
         self.pre_radio.setEnabled(True)
         self.change_colors_btn.setEnabled(True)
 
-        # Invalidate metrics cache since we have new prediction
-        if hasattr(self, '_cached_metrics'):
-            delattr(self, '_cached_metrics')
-
-        # Enable comparison mode if both GT and predicted segmentations exist
-        if self.image.get_GT_segmentation() is not None and self.image.get_pre_segmentation() is not None:
+        if hasattr(self, "_cached_metrics"):
+            delattr(self, "_cached_metrics")
+        if (self.image.get_GT_segmentation() is not None
+                and self.image.get_pre_segmentation() is not None):
             self.compare_radio.setEnabled(True)
-
-        # Update metrics display
         self.update_metrics_display()
 
     def process_with_manual_dimensions(self, dimensions, channel_format, processing_mode):
-        """
-        Process segmentation with manually provided network dimensions.
-
-        Args:
-            dimensions (tuple): The expected input dimensions (width, height) or (width, height, depth)
-            channel_format (str): 'channel_first', 'channel_last', or 'none'
-            processing_mode (str): 'pad' or 'resize'
-        """
+        """Run inference with manually provided spatial dimensions."""
         try:
-            # Determine network dimensionality from dimensions tuple
-            network_dims = "3D" if len(dimensions) == 3 else "2D"
-
-            # Get the image
-            image_data = self.image.get_processed_image().squeeze()
-
-            # Apply preprocessing if configured
-            if self.preprocssing_options:
-                if self.preprocssing_options['Isotropic Resampling']["enabled"]:
-                    self.preprocssing_options['Isotropic Resampling']["values"] = self.image.get_image_spacing(
-                    )
-
-                image_data = self.executor.execute_preprocessing(
-                    image_data, self.preprocssing_options)
-
-            # Resize or pad the image based on the processing mode
-            mode_string = f"{channel_format}-{processing_mode}"
-            resized_image = self.image.resize_image(
-                dimensions, network_dims, mode_string)
-
-            # Get prediction
-            prediction = self.network.get_prediction(resized_image).squeeze()
-
-            # Restore original size
-            restored_prediction = self.image.restore_size(
-                prediction, processing_mode, self.image.get_image_shape()
-            )
-
-            # Set the prediction
-            self.image.set_pre_segmentation(restored_prediction, network_dims)
-
-            # Create meshes and visualizations
-            self.mesh.create_faces_triangles_pre(
-                self.image.get_pre_segmentation())
-            self.open_color_selection()
-
-            # Create cached predicted meshes
-            self.create_pre_meshes()
-            self.mesh_items = self.pre_mesh_items
-
-            self.color_mesh()
-
-            # Enable predicted segmentation radio button
-            self.pre_radio.setChecked(True)
-            self.pre_radio.setEnabled(True)
-            self.change_colors_btn.setEnabled(True)
-
-            QMessageBox.information(
-                self, "Success",
-                "Segmentation completed successfully with manual dimensions!"
-            )
-
-        except Exception as e:
-            self.show_warning(
-                f"Error during segmentation with manual dimensions: {str(e)}")
+            if not self._run_generic_segmentation(
+                    manual_shape=dimensions, channel_format=channel_format):
+                return
+            self._complete_segmentation()
+            QMessageBox.information(self, "Success", "Segmentation completed successfully.")
+        except Exception as exc:
+            self.show_warning(f"Manual segmentation failed: {exc}")
             import traceback
             traceback.print_exc()
 
@@ -888,9 +939,7 @@ class MainWindow(QMainWindow):
             affine[:3, 3] = self.image.get_origin()
             nii_img = nib.Nifti1Image(
                 self.image.get_pre_segmentation(), affine)
-            if not file_path.endswith(('.nii', '.nii.gz')):
-                file_path += '.nii.gz'
-            nib.save(nii_img, file_path)
+            nib.save(nii_img, "output.nii.gz")
 
     def open_color_selection(self):
         numOfClasses = self.image.get_num_of_classes()
@@ -1402,16 +1451,12 @@ class MainWindow(QMainWindow):
         return ndimage.zoom(slice_data, zoom_factors, order=order)  # bilinear
 
     def open_preprocessing_options(self):
-        """Open preprocessing options dialog"""
+        """Open the preprocessing options dialog."""
         if self.image.get_processed_image() is None:
             return
         dialog = PreProcessingWindow(self)
         if dialog.exec() == QDialog.Accepted:
             self.preprocssing_options = dialog.get_selected_options()
-        if self.preprocssing_options:
-            if self.preprocssing_options['Isotropic Resampling']["enabled"]:
-                self.preprocssing_options['Isotropic Resampling']["values"] = self.image.get_image_spacing(
-                )
 
     def create_gt_meshes(self):
         """Create and cache GT (Ground Truth) mesh items"""

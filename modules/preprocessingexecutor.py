@@ -41,8 +41,10 @@ class PreprocessingExecutor:
         logger.info("Starting preprocessing pipeline...")
         logger.info(f"Input image shape: {processed_image.shape}")
 
-        # Process each enabled option
-        for option_name, option_data in options_dict.items():
+        # Spatial resampling must precede intensity preprocessing.
+        ordered_options = list(options_dict.items())
+        ordered_options.sort(key=lambda item: 0 if item[0] == "Isotropic Resampling" else 1)
+        for option_name, option_data in ordered_options:
             if isinstance(option_data, dict) and option_data.get("enabled", False):
                 if option_name in self.function_mapping:
                     try:
@@ -195,8 +197,17 @@ class PreprocessingExecutor:
                 "Invalid number of values for isotropic resampling. "
                 "Provide [target_spacing] or [current_x, current_y, current_z, target_spacing]")
 
-        # Calculate zoom factors for each axis
-        zoom_factors = [curr / target_spacing for curr in current_spacing]
+        if image.ndim != 3:
+            raise ValueError(f"Isotropic resampling requires a 3D image: {image.shape}")
+        current_spacing = np.asarray(current_spacing, dtype=float)
+        target_spacing = float(target_spacing)
+        if not np.all(np.isfinite(current_spacing)) or np.any(current_spacing <= 0):
+            raise ValueError("Original voxel spacing must contain positive finite values")
+        if not np.isfinite(target_spacing) or target_spacing <= 0:
+            raise ValueError("Target voxel spacing must be positive and finite")
+
+        # Keep physical extents approximately unchanged.
+        zoom_factors = (current_spacing / target_spacing).tolist()
         
         logger.info(f"Zoom factors: {zoom_factors}")
         logger.info(f"Original shape: {image.shape}")

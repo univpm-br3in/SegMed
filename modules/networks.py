@@ -40,10 +40,13 @@ class Network:
         if processing_type.lower() == "cpu":
             self.processing_type = "cpu"
         elif processing_type.lower() == "gpu":
-            if torch.cuda.is_available():
-                self.processing_type = "gpu"
+            if self.model_type in ("keras", "tensorflow_saved_model"):
+                available = bool(tf.config.list_physical_devices("GPU"))
             else:
+                available = torch.cuda.is_available()
+            if not available:
                 raise ValueError("GPU is not available. Please use CPU.")
+            self.processing_type = "gpu"
 
     def load_model(self, model_path, weights_path=None):
         """Load a model (Keras, PyTorch, or MONAI Bundle).
@@ -56,13 +59,17 @@ class Network:
             raise FileNotFoundError(f"Model file '{model_path}' not found.")
 
         self.model_type = None
+        self.input_channels = None
+        self.input_shape = None
 
         # Check for nnU-Net or MONAI bundle
         if os.path.isdir(model_path):
-            if self._is_nnunet_folder(model_path):
+            if self._is_nnunet_folder(model_path)[0]:
                 return self._load_nnunet_model(model_path)
-            elif self._is_monai_bundle(model_path):
+            if self._is_monai_bundle(model_path):
                 return self._load_monai_bundle(model_path)
+            if self._is_tensorflow_saved_model(model_path):
+                return self._load_tensorflow_saved_model(model_path)
 
         # Keras models
         if model_path.endswith('.json'):
@@ -79,6 +86,48 @@ class Network:
             return self._load_pytorch_checkpoint(model_path)
 
         raise ValueError(f"Unsupported model format: {model_path}")
+
+    def _is_tensorflow_saved_model(self, path):
+        """Identify a TensorFlow SavedModel directory."""
+        return os.path.isdir(path) and os.path.isfile(
+            os.path.join(path, "saved_model.pb")
+        )
+
+    def _load_tensorflow_saved_model(self, model_path):
+        """Load a TensorFlow SavedModel inference export."""
+        self.model = tf.saved_model.load(model_path)
+        self.model_type = "tensorflow_saved_model"
+        self.input_shape = self._get_tensorflow_input_shape(self.model)
+        self.input_dims = self._infer_keras_dims(self.model)
+        if self.input_dims is None:
+            raise ValueError("SavedModel must expose one batched 2D or 3D image input")
+        return True
+
+    def _get_tensorflow_signature(self, model):
+        signatures = model.signatures
+        if "serving_default" in signatures:
+            return signatures["serving_default"]
+        if len(signatures) == 1:
+            return next(iter(signatures.values()))
+        raise ValueError("No unambiguous TensorFlow inference signature found")
+
+    def _get_tensorflow_input_shape(self, model):
+        signature = self._get_tensorflow_signature(model)
+        args, kwargs = signature.structured_input_signature
+        specs = list(args) + list(kwargs.values())
+        if len(specs) != 1 or not isinstance(specs[0], tf.TensorSpec):
+            raise ValueError("Only single-tensor TensorFlow inputs are supported")
+        return tuple(specs[0].shape.as_list())
+
+    def _get_model_input_shape(self):
+        if self.model_type == "tensorflow_saved_model":
+            return self._get_tensorflow_input_shape(self.model)
+        shape = getattr(self.model, "input_shape", None)
+        if isinstance(shape, list):
+            if len(shape) != 1:
+                raise ValueError("Only single-input models are supported")
+            shape = shape[0]
+        return tuple(shape) if shape is not None else None
 
     def _is_monai_bundle(self, path):
         """Check if directory is a MONAI bundle."""
@@ -1254,63 +1303,139 @@ class Network:
 
     def predict_3D(self, input_data):
         """3D prediction for Keras/PyTorch models."""
-        if self.model_type == "keras":
+        if self.model_type in ("keras", "tensorflow_saved_model"):
             return self._predict_3D_keras(input_data)
         elif self.model_type == "pytorch":
             return self._predict_3D_pytorch(input_data)
 
-    def _predict_3D_keras(self, input_data):
-        """Keras 3D prediction."""
-        if len(input_data.shape) == 3:
-            input_data = np.expand_dims(input_data, axis=0)
-            input_data = np.expand_dims(input_data, axis=-1)
-
-        prediction = self.model.predict(input_data, verbose=0)
-        prediction = prediction.squeeze()
-
-        if len(prediction.shape) > 3:
-            if prediction.shape[-1] > 1:
-                prediction = np.argmax(prediction, axis=-1)
+    def _run_tensorflow_inference(self, tensor_data):
+        """Run inference for a Keras model or a TensorFlow SavedModel."""
+        if self.model_type == "keras":
+            output = self.model.predict(tensor_data, verbose=0)
+        else:
+            signature = self._get_tensorflow_signature(self.model)
+            args, kwargs = signature.structured_input_signature
+            if len(kwargs) == 1 and not args:
+                name, spec = next(iter(kwargs.items()))
+                output = signature(**{
+                    name: tf.convert_to_tensor(tensor_data, dtype=spec.dtype)
+                })
+            elif len(args) == 1 and not kwargs:
+                output = signature(tf.convert_to_tensor(tensor_data, dtype=args[0].dtype))
             else:
-                prediction = np.round(prediction)
+                raise ValueError("Only single-tensor SavedModel inputs are supported")
 
-        return prediction.astype(np.uint8)
+        if isinstance(output, dict):
+            if len(output) != 1:
+                raise ValueError("Models with multiple outputs are not supported")
+            output = next(iter(output.values()))
+        if isinstance(output, (list, tuple)):
+            if len(output) != 1:
+                raise ValueError("Models with multiple outputs are not supported")
+            output = output[0]
+        return np.asarray(output)
+
+    @staticmethod
+    def _labels_from_output(output, spatial_ndim, channel_format):
+        """Convert a single-image probability output into label indices."""
+        output = np.asarray(output)
+        if output.ndim < 1 or output.shape[0] != 1:
+            raise ValueError(f"Expected one prediction batch, got {output.shape}")
+        output = output[0]
+        if output.ndim == spatial_ndim + 1:
+            channel_axis = 0 if channel_format == "channel_first" else -1
+            if output.shape[channel_axis] == 1:
+                output = np.take(output, 0, axis=channel_axis)
+                if np.issubdtype(output.dtype, np.floating):
+                    output = output >= 0.5
+            else:
+                output = np.argmax(output, axis=channel_axis)
+        elif output.ndim == spatial_ndim:
+            if np.issubdtype(output.dtype, np.floating):
+                output = output >= 0.5
+        else:
+            raise ValueError(f"Unexpected model output shape: {output.shape}")
+        if np.issubdtype(output.dtype, np.integer) and np.any(output > 255):
+            raise ValueError("Segmentation has more than 255 labels")
+        return output.astype(np.uint8)
+
+    def _predict_3D_keras(self, input_data):
+        """Run a single-volume TensorFlow inference pass."""
+        input_data = np.asarray(input_data, dtype=np.float32)
+        if input_data.ndim != 3:
+            raise ValueError(f"Expected 3D image, got {input_data.shape}")
+        channel_format = self.input_channels or "channel_last"
+        if channel_format == "channel_first":
+            tensor = input_data[np.newaxis, np.newaxis, ...]
+        else:
+            tensor = input_data[np.newaxis, ..., np.newaxis]
+        output = self._run_tensorflow_inference(tensor)
+        labels = self._labels_from_output(output, 3, channel_format)
+        if labels.shape != input_data.shape:
+            raise ValueError(f"Model output shape {labels.shape} differs from input {input_data.shape}")
+        return labels
 
     def _predict_3D_pytorch(self, input_data):
-        """PyTorch 3D prediction."""
+        """Run 3D inference with a single-channel PyTorch model."""
         device = self._get_torch_device()
-
-        if isinstance(input_data, np.ndarray):
-            input_tensor = torch.from_numpy(input_data).float()
-        else:
-            input_tensor = input_data
-
-        if input_tensor.ndim == 3:
-            input_tensor = input_tensor.unsqueeze(0).unsqueeze(0)
-        elif input_tensor.ndim == 4:
-            input_tensor = input_tensor.unsqueeze(0)
-
-        input_tensor = input_tensor.to(device)
+        input_data = np.asarray(input_data, dtype=np.float32)
+        if input_data.ndim != 3:
+            raise ValueError(f"Expected a 3D image, got {input_data.shape}")
+        input_tensor = torch.from_numpy(input_data.copy())[None, None].to(device)
         self.model.to(device)
         self.model.eval()
-
         with torch.no_grad():
             prediction = self.model(input_tensor)
-
-        prediction = prediction.squeeze()
-
-        if prediction.ndim == 4:
-            if prediction.shape[0] > 1:
-                prediction = torch.argmax(prediction, dim=0)
-            else:
-                prediction = torch.round(prediction)
-
-        return prediction.cpu().numpy().astype(np.uint8)
+        if isinstance(prediction, (list, tuple)):
+            if len(prediction) != 1:
+                raise ValueError("Multiple model outputs are not supported")
+            prediction = prediction[0]
+        result = self._labels_from_output(
+            prediction.detach().cpu().numpy(), 3, "channel_first"
+        )
+        if result.shape != input_data.shape:
+            raise ValueError(f"Unexpected output shape: {result.shape}")
+        return result
 
     def predict_25D(self, input_data):
-        """2.5D prediction (slice-by-slice)."""
-        # Implementation omitted for brevity - same as before
-        pass
+        """Segment each slice independently using a 2D network."""
+        input_data = np.asarray(input_data, dtype=np.float32)
+        if input_data.ndim != 3:
+            raise ValueError(f"Expected 3D image, got {input_data.shape}")
+        height, width, depth = input_data.shape
+        result = np.zeros(input_data.shape, dtype=np.uint8)
+
+        if self.model_type == "pytorch":
+            device = self._get_torch_device()
+            self.model.to(device)
+            self.model.eval()
+            for z in range(depth):
+                tensor = torch.from_numpy(input_data[:, :, z].copy())
+                tensor = tensor[None, None].to(device)
+                with torch.no_grad():
+                    output = self.model(tensor)
+                if isinstance(output, (list, tuple)):
+                    if len(output) != 1:
+                        raise ValueError("Multiple model outputs are not supported")
+                    output = output[0]
+                labels = self._labels_from_output(output.detach().cpu().numpy(), 2, "channel_first")
+                if labels.shape != (height, width):
+                    raise ValueError(f"Unexpected 2D output shape: {labels.shape}")
+                result[:, :, z] = labels
+        elif self.model_type in ("keras", "tensorflow_saved_model"):
+            channel_format = self.input_channels or "channel_last"
+            for z in range(depth):
+                image_slice = input_data[:, :, z]
+                tensor = (image_slice[None, None, ...] if channel_format == "channel_first"
+                          else image_slice[None, ..., None])
+                output = self._run_tensorflow_inference(tensor)
+                labels = self._labels_from_output(output, 2, channel_format)
+                if labels.shape != (height, width):
+                    raise ValueError(f"Unexpected 2D output shape: {labels.shape}")
+                result[:, :, z] = labels
+        else:
+            raise ValueError(f"Unsupported 2D model type: {self.model_type}")
+        return result
 
     def _get_torch_device(self):
         """Get PyTorch device based on settings."""
@@ -1319,12 +1444,22 @@ class Network:
         return torch.device("cpu")
 
     def _infer_keras_dims(self, model):
-        """Infer if Keras model is 2D or 3D."""
-        has_conv3d = any(isinstance(layer, tf.keras.layers.Conv3D)
-                         for layer in model.layers)
-        has_conv2d = any(isinstance(layer, tf.keras.layers.Conv2D)
-                         for layer in model.layers)
-        return "3D" if has_conv3d else "2D"
+        """Determine spatial dimensionality from the model's input tensor rank."""
+        if hasattr(model, "signatures"):
+            shape = self._get_tensorflow_input_shape(model)
+        else:
+            shape = getattr(model, "input_shape", None)
+            if isinstance(shape, list):
+                if len(shape) != 1:
+                    return None
+                shape = shape[0]
+        if shape is None:
+            return None
+        if len(shape) == 4:
+            return "2D"
+        if len(shape) == 5:
+            return "3D"
+        return None
 
     def _torch_find_input_dim(self, module):
         """
@@ -1471,7 +1606,7 @@ class Network:
 
         # Try to get input shape from model
         try:
-            if self.model_type == "keras":
+            if self.model_type in ("keras", "tensorflow_saved_model"):
                 return self._check_keras_compatibility(image_shape)
             elif self.model_type == "pytorch":
                 return self._check_pytorch_compatibility(image_shape)
@@ -1485,144 +1620,43 @@ class Network:
         return True, None, None
 
     def _check_keras_compatibility(self, image_shape):
-        """Check compatibility for Keras models."""
+        """Check image dimensions against a single-channel TensorFlow input."""
         try:
-            # Get the input shape from the model
-            if not hasattr(self.model, 'input_shape'):
-                print("Warning: Keras model has no input_shape attribute")
+            input_shape = self._get_model_input_shape()
+            if input_shape is None or len(input_shape) not in (4, 5):
                 return False, None, None
 
-            input_shape = self.model.input_shape
+            model_shape = input_shape[1:]
+            spatial_ndim = len(model_shape) - 1
+            if self.input_channels not in ("channel_first", "channel_last"):
+                first_is_channel = model_shape[0] in (1, 2, 3, 4)
+                last_is_channel = model_shape[-1] in (1, 2, 3, 4)
+                self.input_channels = (
+                    "channel_first" if first_is_channel and not last_is_channel
+                    else "channel_last"
+                )
+            if self.input_channels == "channel_first":
+                channels, spatial_shape = model_shape[0], model_shape[1:]
+            else:
+                channels, spatial_shape = model_shape[-1], model_shape[:-1]
 
-            if input_shape is None:
-                print("Warning: Keras model input_shape is None")
+            if channels not in (1, None):
+                print(f"Unsupported number of channels: {channels}")
+                return False, None, "unsupported_channels"
+            if len(image_shape) != 3:
                 return False, None, None
 
-            # Remove batch dimension
-            if isinstance(input_shape, list):
-                if len(input_shape) == 0:
-                    print("Warning: Keras model input_shape list is empty")
-                    return False, None, None
-                input_shape = input_shape[0]
-
-            # Skip batch dimension (first element)
-            if len(input_shape) <= 1:
-                print(
-                    f"Warning: Keras model input_shape too short: {input_shape}")
-                return False, None, None
-
-            model_shape = input_shape[1:]  # Skip batch dimension
-
-            print(
-                f"Debug: Keras model shape (after removing batch): {model_shape}")
-            print(f"Debug: Image shape: {image_shape}")
-            print(f"Debug: Input channels setting: {self.input_channels}")
-
-            # Handle None dimensions (flexible dimensions)
-            # If model has None dimensions, we consider it flexible/compatible
-            if None in model_shape:
-                print(
-                    "Debug: Model has flexible dimensions (None), considering compatible")
+            # A 2D model accepts the image's first two spatial axes as slices.
+            compared_shape = tuple(image_shape[:spatial_ndim])
+            required = tuple(
+                current if expected is None else int(expected)
+                for current, expected in zip(compared_shape, spatial_shape)
+            )
+            if required == compared_shape:
                 return True, None, None
-
-            # Auto-detect channel format if not set
-            # Convention: channel dimension is typically 1 or 3 (RGB)
-            if self.input_channels is None:
-                if len(model_shape) == 3:  # 2D model
-                    # Check if first or last dimension is likely channels
-                    if model_shape[0] in [1, 3, 4]:
-                        self.input_channels = "channel_first"
-                        print(
-                            f"Debug: Auto-detected channel_first (first dim = {model_shape[0]})")
-                    elif model_shape[-1] in [1, 3, 4]:
-                        self.input_channels = "channel_last"
-                        print(
-                            f"Debug: Auto-detected channel_last (last dim = {model_shape[-1]})")
-                    else:
-                        # Ambiguous, default to channel_last (TensorFlow/Keras convention)
-                        self.input_channels = "channel_last"
-                        print("Debug: Ambiguous format, defaulting to channel_last")
-
-                elif len(model_shape) == 4:  # 3D model
-                    # Check if first or last dimension is likely channels
-                    if model_shape[0] in [1, 3, 4]:
-                        self.input_channels = "channel_first"
-                        print(
-                            f"Debug: Auto-detected channel_first (first dim = {model_shape[0]})")
-                    elif model_shape[-1] in [1, 3, 4]:
-                        self.input_channels = "channel_last"
-                        print(
-                            f"Debug: Auto-detected channel_last (last dim = {model_shape[-1]})")
-                    else:
-                        # Ambiguous, default to channel_last (TensorFlow/Keras convention)
-                        self.input_channels = "channel_last"
-                        print("Debug: Ambiguous format, defaulting to channel_last")
-
-            # Determine if 2D or 3D based on model_shape length
-            if len(model_shape) == 3:  # (H, W, C) or (C, H, W)
-                # 2D model
-                if len(image_shape) == 3:
-                    # Image is 3D, not compatible with 2D model
-                    print("Debug: 2D model but 3D image - incompatible")
-                    return False, None, None
-
-                # Extract spatial dimensions based on channel format
-                if self.input_channels == "channel_last":
-                    required = tuple(model_shape[:2])  # (H, W) - first 2 dims
-                elif self.input_channels == "channel_first":
-                    required = tuple(model_shape[1:])  # (H, W) - last 2 dims
-                else:
-                    # No channels, all spatial
-                    required = tuple(model_shape)
-
-                print(f"Debug: Required shape for 2D: {required}")
-
-                if tuple(image_shape) == required:
-                    return True, None, None
-                else:
-                    return False, required, "resize"
-
-            elif len(model_shape) == 4:  # (D, H, W, C) or (C, D, H, W)
-                # 3D model
-                if len(image_shape) == 2:
-                    # Image is 2D, not compatible with 3D model
-                    print("Debug: 3D model but 2D image - incompatible")
-                    return False, None, None
-
-                # Extract spatial dimensions based on channel format
-                if self.input_channels == "channel_last":
-                    # (D, H, W) - first 3 dims
-                    required = tuple(model_shape[:3])
-                elif self.input_channels == "channel_first":
-                    # (D, H, W) - last 3 dims
-                    required = tuple(model_shape[1:])
-                else:
-                    # No channels, all spatial
-                    required = tuple(model_shape)
-
-                print(f"Debug: Required shape for 3D: {required}")
-                print(f"Debug: Image shape: {tuple(image_shape)}")
-
-                if tuple(image_shape) == required:
-                    print("Debug: Shapes match! Compatible.")
-                    return True, None, None
-                else:
-                    print("Debug: Shapes don't match. Incompatible.")
-                    return False, required, "resize"
-
-            # Unknown model shape
-            print(
-                f"Warning: Unknown Keras model shape length: {len(model_shape)}")
-            return False, None, None
-
-        except AttributeError as e:
-            print(f"Keras compatibility check failed - AttributeError: {e}")
-            print("This might be a custom model without standard attributes")
-            return False, None, None
-        except Exception as e:
-            print(f"Keras compatibility check failed: {e}")
-            import traceback
-            traceback.print_exc()
+            return False, required, "pad_crop"
+        except Exception as exc:
+            print(f"TensorFlow model compatibility check failed: {exc}")
             return False, None, None
 
     def _check_pytorch_compatibility(self, image_shape):
@@ -1633,13 +1667,9 @@ class Network:
             self.model.to(device)
             self.model.eval()
 
-            # Determine dimensionality from image shape
-            if len(image_shape) == 2:
-                # 2D image
-                test_input = torch.randn(1, 1, *image_shape).to(device)
-            else:
-                # 3D image
-                test_input = torch.randn(1, 1, *image_shape).to(device)
+            # For 2D networks, validate one slice rather than the entire volume.
+            spatial_shape = image_shape[:2] if self.input_dims == "2D" else image_shape
+            test_input = torch.randn(1, 1, *spatial_shape).to(device)
 
             # Try forward pass
             try:
