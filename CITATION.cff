@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: >-
+  If you use SegMed in your research, please cite this software release
+  and the associated publication (DOI: 10.3390/app16073490).
+type: software
+title: 'SegMed: Medical Image Segmentation Tool'
+version: 1.5.0
+license: Apache-2.0
+repository-code: 'https://github.com/univpm-br3in/SegMed'
+url: 'https://github.com/univpm-br3in/SegMed'
+authors:
+  - family-names: Mortada
+    given-names: Mhd Jafar
+  - family-names: Sbrollini
+    given-names: Agnese
+  - family-names: Proniewska-van Dam
+    given-names: Klaudia
+  - family-names: Van Dam
+    given-names: Peter M.
+  - family-names: Burattini
+    given-names: Laura
+keywords:
+  - medical image segmentation
+  - deep learning
+  - 3D medical imaging
+  - nnU-Net
+  - MONAI
+  - PyTorch
+  - TensorFlow
+abstract: >-
+  Deep learning has become central to semantic segmentation of three-dimensional medical images. However—despite many published models—their adoption in practice remains limited, as deployment often requires advanced programming skills and familiarity with specific machine learning frameworks. Thus, technical barriers restrict its use to specialized users. To address this, we present SegMed (version 1.0), an open-source, standalone desktop application that provides an end-to-end workflow for deep learning-based medical image segmentation. SegMed supports the loading and inspection of common medical image formats, as well as array-based formats. The application integrates standard preprocessing operations often used in the field and directly supports loading of pretrained segmentation models implemented in both PyTorch (version 2.X) and Keras (version 2.X) and those created using the Medical Open Network for AI framework (version 1.X). Models are automatically inspected to infer required configurations, such as input size and post-processing steps, enabling segmentation with minimal user intervention. Results can be exported as volumetric images or 3D surface meshes for downstream analysis, visualization, or special applications such as virtual reality. SegMed was tested using multiple publicly available pretrained models, demonstrating robustness and flexibility across diverse segmentation tasks. By abstracting low-level implementation details, SegMed lowers technical barriers, promotes reproducibility, and facilitates the integration of AI-assisted segmentation into medical imaging workflows.
